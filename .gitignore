@@ -1,4 +1,7 @@
 .DS_Store
 node_modules/
+data/*.db
+data/*.db-*
+exports/*
 *.tmp
 *.log

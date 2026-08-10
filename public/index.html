@@ -265,6 +265,8 @@
     .inline-image .image-remove { top:5px; right:5px; }
     .add-images-btn { margin-top:2px; }
     .image-limit { margin-left:7px; color:var(--subtle); font-size:11px; }
+    .ai-image-status { min-height:20px; margin-top:10px; color:var(--muted); font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .ai-image-status.busy { color:var(--primary); }
     .publish-preview { margin-top:18px; padding:14px; border:1px solid var(--border); border-radius:11px; background:#f9fafb; }
     .publish-preview-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
     .publish-preview-head strong { font-size:13px; }
@@ -588,7 +590,7 @@
       </div>
       <div class="sidebar-footer">
         <div class="save-state"><i class="save-dot"></i><span id="saveLabel">已保存到本机</span></div>
-        <div class="sidebar-tip">数据仅存储在当前浏览器</div>
+        <div class="sidebar-tip">数据存储在本机 SQLite</div>
       </div>
     </aside>
 
@@ -611,8 +613,7 @@
     (() => {
       'use strict';
 
-      const STORAGE_KEY = 'content_platform_state_v1';
-      const APP_VERSION = '1.3.1';
+      const APP_VERSION = '2.0.0';
       const SCORE_LABELS = { intensity: '烈度', whitespace: '空白度', persona: '人设匹配', timeliness: '时效' };
       const CHECKLIST_LABELS = ['已调研同类爆款', '标题有方向性钩子', '正文不超过200字', 'emoji不超过2个', '封面一秒看清且价值前置', '全文未出现平台名'];
       const STAGES = ['24h', '7d', '30d'];
@@ -718,7 +719,7 @@
         });
         merged.drafts = merged.drafts.map(d => {
           const item = d && typeof d === 'object' ? d : {};
-          const normalized = { body:'', coverIdea:'', coverType:'其他', coverImage:'', images:[], checklist:Array(6).fill(false), createdAt:nowISO(), updatedAt:nowISO(), ...item, sourceIdeaId:item.sourceIdeaId||item.ideaId||null, coverImage:safeImageSrc(item.coverImage), images:Array.isArray(item.images)?item.images.map(safeImageSrc).filter(Boolean).slice(0,MAX_BODY_IMAGES):[], checklist:CHECKLIST_LABELS.map((_,i)=>Boolean(item.checklist?.[i])) };
+          const normalized = { body:'', coverIdea:'', coverType:'其他', coverImage:'', images:[], checklist:Array(6).fill(false), createdAt:nowISO(), updatedAt:nowISO(), ...item, sourceIdeaId:item.sourceIdeaId||item.ideaId||null, coverImage:safeStoredImage(item.coverImage), images:Array.isArray(item.images)?item.images.map(safeStoredImage).filter(Boolean).slice(0,MAX_BODY_IMAGES):[], checklist:CHECKLIST_LABELS.map((_,i)=>Boolean(item.checklist?.[i])) };
           delete normalized.ideaId;
           return normalized;
         });
@@ -727,8 +728,8 @@
           return {
             body:'', coverIdea:'', coverType:'其他', coverImage:'', images:[], publishedAt:nowISO(),
             platform:'小红书', mark:'normal', reviewNote:'', ...item,
-            coverImage:safeImageSrc(item.coverImage),
-            images:Array.isArray(item.images)?item.images.map(safeImageSrc).filter(Boolean).slice(0,MAX_BODY_IMAGES):[],
+            coverImage:safeStoredImage(item.coverImage),
+            images:Array.isArray(item.images)?item.images.map(safeStoredImage).filter(Boolean).slice(0,MAX_BODY_IMAGES):[],
             metrics:Object.fromEntries(STAGES.map(stage=>[stage,{...blankMetrics(),...(item.metrics?.[stage]||{})}]))
           };
         });
@@ -748,41 +749,262 @@
         return merged;
       }
 
-      function loadState() {
-        try {
-          const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-          if (!saved) return defaultState();
-          const normalized = normalizeState(saved);
-          if (saved.version !== APP_VERSION) {
-            normalized.published = [];
-            normalized.drafts = defaultState().drafts;
-            normalized.activeDraftId = 'draft_ai_image';
-          }
-          return normalized;
-        } catch (error) { console.warn('数据读取失败，已恢复示例数据', error); return defaultState(); }
+      async function apiRequest(url, options={}) {
+        const response = await fetch(url, {
+          ...options,
+          headers:{ 'Content-Type':'application/json', ...(options.headers||{}) }
+        });
+        const payload = await response.json().catch(()=>null);
+        if (!response.ok || !payload?.success) throw new Error(payload?.error || `请求失败（${response.status}）`);
+        return payload.data;
       }
 
-      let state = loadState();
+      function ideaFromApi(item={}) {
+        return {
+          id:item.id,
+          title:item.title||'',
+          sectionId:item.section||'',
+          sourceMode:item.source==='manual'?'manual':/热点|雷达|自动|监测/.test(item.source||'')?'auto':'manual',
+          source:item.source||'manual',
+          scores:{
+            intensity:Number(item.score_intensity||0),
+            whitespace:Number(item.score_gap||0),
+            persona:Number(item.score_persona||0),
+            timeliness:Number(item.score_timing||0)
+          },
+          status:item.status||'pending',
+          note:item.note||'',
+          createdAt:item.created_at||nowISO(),
+          updatedAt:item.updated_at||item.created_at||nowISO()
+        };
+      }
+
+      function draftFromApi(item={}) {
+        return {
+          id:item.id,
+          sourceIdeaId:item.idea_id||null,
+          sectionId:item.section||'',
+          title:item.title||'',
+          body:item.body||'',
+          tags:Array.isArray(item.tags)?item.tags:[],
+          coverImage:item.cover_image||'',
+          coverIdea:item.cover_idea||'',
+          coverType:item.cover_type||'其他',
+          images:Array.isArray(item.images)?item.images:[],
+          checklist:Array.isArray(item.checklist)?item.checklist:Array(6).fill(false),
+          status:item.status||'editing',
+          createdAt:item.created_at||nowISO(),
+          updatedAt:item.updated_at||nowISO()
+        };
+      }
+
+      function publishedFromApi(item={}) {
+        return {
+          id:item.id,
+          draftId:item.draft_id||null,
+          title:item.title||'',
+          sectionId:item.section||'',
+          body:item.body||'',
+          tags:Array.isArray(item.tags)?item.tags:[],
+          coverImage:item.cover_image||'',
+          images:Array.isArray(item.images)?item.images:[],
+          platform:item.platform||'小红书',
+          publishedAt:item.publish_date||nowISO(),
+          metrics:{
+            '24h':{...blankMetrics(),...(item.metrics_24h||{})},
+            '7d':{...blankMetrics(),...(item.metrics_7d||{})},
+            '30d':{...blankMetrics(),...(item.metrics_30d||{})}
+          },
+          mark:item.rating||'normal',
+          reviewNote:item.review||'',
+          createdAt:item.created_at||nowISO(),
+          coverType:'其他',
+          coverIdea:''
+        };
+      }
+
+      function sectionFromApi(item={}, index=0) {
+        const colors = ['#2563eb','#10b981','#8b5cf6','#f59e0b','#ef4444','#06b6d4'];
+        return { id:item.id, name:item.name||'未命名板块', icon:item.icon||'📄', color:colors[index%colors.length], ratio:index===0?70:index===1?30:0 };
+      }
+
+      function ideaToApi(item={}) {
+        return {
+          id:item.id,
+          title:item.title||'',
+          section:item.sectionId||'',
+          source:item.source||'manual',
+          score_intensity:Number(item.scores?.intensity||0),
+          score_gap:Number(item.scores?.whitespace||0),
+          score_persona:Number(item.scores?.persona||0),
+          score_timing:Number(item.scores?.timeliness||0),
+          status:item.status||'pending',
+          note:item.note||'',
+          created_at:item.createdAt||nowISO()
+        };
+      }
+
+      function extractTags(item={}) {
+        if (Array.isArray(item.tags) && item.tags.length) return item.tags.map(tag=>String(tag).replace(/^#/,''));
+        return [...new Set((`${item.title||''} ${item.body||''}`.match(/#[\p{L}\p{N}_-]+/gu)||[]).map(tag=>tag.slice(1)))].slice(0,8);
+      }
+
+      function draftToApi(item={}) {
+        return {
+          id:item.id,
+          idea_id:item.sourceIdeaId||null,
+          title:item.title||'',
+          section:item.sectionId||'',
+          body:item.body||'',
+          tags:extractTags(item),
+          cover_image:item.coverImage||'',
+          cover_idea:item.coverIdea||'',
+          cover_type:item.coverType||'其他',
+          images:Array.isArray(item.images)?item.images:[],
+          checklist:CHECKLIST_LABELS.map((_,index)=>Boolean(item.checklist?.[index])),
+          status:item.status||'editing',
+          created_at:item.createdAt||nowISO()
+        };
+      }
+
+      function publishedToApi(item={}) {
+        return {
+          id:item.id,
+          draft_id:item.draftId||null,
+          title:item.title||'',
+          section:item.sectionId||'',
+          body:item.body||'',
+          tags:extractTags(item),
+          cover_image:item.coverImage||'',
+          images:Array.isArray(item.images)?item.images:[],
+          platform:item.platform||'小红书',
+          publish_date:item.publishedAt||nowISO(),
+          metrics_24h:item.metrics?.['24h']||blankMetrics(),
+          metrics_7d:item.metrics?.['7d']||blankMetrics(),
+          metrics_30d:item.metrics?.['30d']||blankMetrics(),
+          rating:item.mark||'normal',
+          review:item.reviewNote||'',
+          created_at:item.createdAt||nowISO()
+        };
+      }
+
+      const API_COLLECTIONS = {
+        ideas:{ path:'/api/ideas', serialize:ideaToApi },
+        drafts:{ path:'/api/drafts', serialize:draftToApi },
+        published:{ path:'/api/published', serialize:publishedToApi },
+        sections:{ path:'/api/sections', serialize:item=>({id:item.id,name:item.name,icon:item.icon}) },
+        principles:{ path:'/api/principles', serialize:item=>({id:item.id,text:item.text,category:item.category||'内容',enabled:Boolean(item.enabled),sort_order:item.sort_order}) }
+      };
+
+      let state = defaultState();
       let activeView = navItems.some(n => n.id === state.settings.activeView) ? state.settings.activeView : 'ideas';
       let activeMetricStages = {};
       let draftSearchQuery = '';
       let saveTimer = null;
+      let apiReady = false;
+      let syncRunning = false;
+      let syncRequested = false;
+      let syncedCollections = Object.fromEntries(Object.keys(API_COLLECTIONS).map(key=>[key,new Map()]));
       let pendingConfirmAction = null;
       let activeIdeaFormDraft = null;
       const extensionModules = new Map();
       const subscribers = new Set();
 
+      function setSaveLabel(text) {
+        const label = document.getElementById('saveLabel');
+        if (label) label.textContent = text;
+      }
+
+      const comparable = value => JSON.stringify(value);
+
+      async function syncCollection(key) {
+        const config = API_COLLECTIONS[key];
+        const currentItems = stateItems(key);
+        const currentById = new Map(currentItems.map(item=>[item.id,item]));
+        const previous = syncedCollections[key];
+
+        for (const [id] of previous) {
+          if (!currentById.has(id)) {
+            if (key==='principles') continue;
+            await apiRequest(`${config.path}/${encodeURIComponent(id)}`, { method:'DELETE' });
+            previous.delete(id);
+          }
+        }
+
+        for (const item of currentItems) {
+          const body = config.serialize(item);
+          const old = previous.get(item.id);
+          if (!old) {
+            if (key==='principles') continue;
+            await apiRequest(config.path, { method:'POST', body:JSON.stringify(body) });
+            previous.set(item.id, clone(item));
+          } else if (comparable(config.serialize(old)) !== comparable(body)) {
+            await apiRequest(`${config.path}/${encodeURIComponent(item.id)}`, { method:'PUT', body:JSON.stringify(body) });
+            previous.set(item.id, clone(item));
+          }
+        }
+      }
+
+      async function flushSync() {
+        if (!apiReady) return;
+        syncRequested = true;
+        if (syncRunning) return;
+        syncRunning = true;
+        try {
+          while (syncRequested) {
+            syncRequested = false;
+            setSaveLabel('正在保存到数据库…');
+            for (const key of ['sections','ideas','drafts','published','principles']) await syncCollection(key);
+          }
+          setSaveLabel(`已保存 · ${formatDate(state.meta.updatedAt,true)}`);
+        } catch (error) {
+          console.error('API 同步失败',error);
+          setSaveLabel('保存失败 · 点击或继续编辑重试');
+          toast('保存失败',error.message||'无法连接后端 API','error');
+        } finally {
+          syncRunning = false;
+          if (syncRequested) flushSync();
+        }
+      }
+
       function saveState(immediate=false) {
         clearTimeout(saveTimer);
         const write = () => {
           state.meta.updatedAt = nowISO();
-          try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
-          catch (error) { toast('保存失败','浏览器本地存储空间不足，请删除部分图片','error');return; }
-          const label = document.getElementById('saveLabel');
-          if (label) label.textContent = `已保存 · ${formatDate(state.meta.updatedAt, true)}`;
+          if (apiReady) flushSync();
+          else setSaveLabel('Mock 数据 · 后端连接中');
           subscribers.forEach(fn => { try { fn(clone(state)); } catch (e) { console.error(e); } });
         };
         if (immediate) write(); else saveTimer = setTimeout(write, 220);
+      }
+
+      async function hydrateState() {
+        setSaveLabel('正在连接数据库…');
+        try {
+          const [ideas,drafts,published,principles,sections] = await Promise.all([
+            apiRequest('/api/ideas'), apiRequest('/api/drafts'), apiRequest('/api/published'),
+            apiRequest('/api/principles'), apiRequest('/api/sections')
+          ]);
+          const hydrated = normalizeState({
+            ...defaultState(),
+            settings:{...state.settings},
+            ideas:ideas.map(ideaFromApi),
+            drafts:drafts.filter(item=>item.status!=='published').map(draftFromApi),
+            published:published.map(publishedFromApi),
+            principles:principles.map(item=>({id:item.id,text:item.text,category:item.category,enabled:Boolean(item.enabled),sort_order:item.sort_order})),
+            sections:sections.map(sectionFromApi)
+          });
+          state = hydrated;
+          activeView = navItems.some(item=>item.id===state.settings.activeView)?state.settings.activeView:'ideas';
+          syncedCollections = Object.fromEntries(Object.keys(API_COLLECTIONS).map(key=>[key,new Map(stateItems(key).map(item=>[item.id,clone(item)]))]));
+          apiReady = true;
+          render();
+          setSaveLabel(`数据库已连接 · ${formatDate(nowISO(),true)}`);
+        } catch (error) {
+          console.warn('后端暂不可用，继续使用 mock 数据',error);
+          setSaveLabel('Mock 数据 · 后端未连接');
+          toast('后端暂不可用','页面已使用 mock 数据打开；启动 node server.js 后刷新即可','warn');
+        }
       }
 
       function getSection(id) { return stateItems('sections').find(s => s?.id === id) || { name:'未分板块', icon:'📁', color:'#6b7280' }; }
@@ -1007,9 +1229,30 @@
           : `<div class="ai-result clean"><div class="ai-result-head"><span>✓</span>没闻到明显AI味</div><p>句式、语气和emoji数量都比较克制。</p></div>`;
       }
 
-      function safeImageSrc(value) {
+      function generatedImageName(value) {
         const source = String(value || '');
-        return /^data:image\/[a-z0-9.+-]+;base64,/i.test(source) ? source : '';
+        const normalized = source.replace(/\\/g, '/');
+        const match = normalized.match(/(?:^|\/)Downloads\/(Gemini_Generated_Image_[^/]+\.png)$/i);
+        return match?.[1] || '';
+      }
+
+      function safeStoredImage(value) {
+        const source = String(value || '');
+        if (/^(?:data:image\/[a-z0-9.+-]+;base64,|\/assets\/[a-z0-9._-]+$)/i.test(source)) return source;
+        if (generatedImageName(source)) return source;
+        if (source.startsWith('/generated-images/')) {
+          try {
+            const name = decodeURIComponent(source.slice('/generated-images/'.length));
+            if (/^Gemini_Generated_Image_.*\.png$/i.test(name)) return source;
+          } catch (_) {}
+        }
+        return '';
+      }
+
+      function safeImageSrc(value) {
+        const source = safeStoredImage(value);
+        const name = generatedImageName(source);
+        return name ? `/generated-images/${encodeURIComponent(name)}` : source;
       }
 
       function imageDataBytes(dataUrl) {
@@ -1117,13 +1360,13 @@
         const cover = safeImageSrc(item.coverImage);
         const images = Array.isArray(item.images) ? item.images.map(safeImageSrc).filter(Boolean) : [];
         return `<div class="media-editor">
-          <div class="media-section"><div class="media-section-head"><label class="field-label">封面图</label><span class="media-help">支持点击或拖拽上传</span></div>
+          <div class="media-section"><div class="media-section-head"><label class="field-label">封面图</label><span class="media-help">支持点击或拖拽上传</span><button class="btn btn-sm" type="button" data-action="scan-gemini" data-id="${escAttr(item.id||'')}">${icons.spark}扫描Gemini图</button></div>
             <div class="cover-upload ${cover?'has-image':''}" data-action="select-cover-image" data-id="${escAttr(item.id||'')}" data-cover-dropzone="${escAttr(item.id||'')}" role="button" tabindex="0" aria-label="${cover?'更换封面图':'点击添加封面'}">
               ${cover?`<img src="${escAttr(cover)}" alt="封面图预览"><button class="image-remove" type="button" data-action="remove-cover-image" data-id="${escAttr(item.id||'')}" title="删除封面图" aria-label="删除封面图">×</button>`:`<span class="cover-placeholder"><span class="camera">📷</span><strong>点击添加封面</strong></span>`}
             </div>
             <input class="hidden" type="file" accept="image/*" data-cover-image-input data-id="${escAttr(item.id||'')}">
           </div>
-          <div class="media-section"><div class="media-section-head"><label class="field-label">正文配图</label><span class="media-help">1–9 张 · 本机图片共不超过 3MB</span></div>
+          <div class="media-section"><div class="media-section-head"><label class="field-label">正文配图</label><span class="media-help">1–9 张 · 本机图片共不超过 3MB</span><button class="btn btn-sm" type="button" data-action="ai-generate-image" data-id="${escAttr(item.id||'')}" ${images.length>=MAX_BODY_IMAGES?'disabled':''}>${icons.spark}AI生成配图</button></div>
             ${images.length?`<div class="inline-images">${images.map((image,index)=>`<div class="inline-image"><img src="${escAttr(image)}" alt="正文配图 ${index+1}"><button class="image-remove" type="button" data-action="remove-body-image" data-id="${escAttr(item.id||'')}" data-index="${index}" title="删除配图" aria-label="删除第 ${index+1} 张配图">×</button></div>`).join('')}</div>`:''}
             <input class="hidden" type="file" accept="image/*" multiple data-body-images-input data-id="${escAttr(item.id||'')}">
             <button class="btn btn-sm add-images-btn" type="button" data-action="select-body-images" data-id="${escAttr(item.id||'')}" ${images.length>=MAX_BODY_IMAGES?'disabled':''}>${icons.plus}添加配图</button><span class="image-limit">${images.length} / ${MAX_BODY_IMAGES}</span>
@@ -1138,9 +1381,14 @@
         const checked = checklist.filter(Boolean).length;
         return `<article class="card draft-card" data-draft-card="${escAttr(item.id||'')}">
           <div class="editor-pane">
-            <div class="editor-head"><div class="eyebrow">自动保存 · 更新于 ${formatDate(item.updatedAt,true)}</div><button class="btn btn-sm btn-ghost" data-action="delete-draft" data-id="${escAttr(item.id||'')}">${icons.trash}删除</button></div>
+            <div class="editor-head"><div class="eyebrow">自动保存到 SQLite · 更新于 ${formatDate(item.updatedAt,true)}</div><button class="btn btn-sm btn-ghost" data-action="delete-draft" data-id="${escAttr(item.id||'')}">${icons.trash}删除</button></div>
             <input class="draft-title-input" data-draft-field="title" data-id="${escAttr(item.id||'')}" value="${escAttr(item.title||'')}" aria-label="稿件标题">
             <div class="editor-meta"><label class="field-label">正文</label><span class="word-count ${count>200?'over':''}" id="word-${escAttr(item.id||'')}">${count} / 200 字</span></div>
+            <div class="review-actions" style="margin:0 0 10px;grid-template-columns:repeat(3,max-content);justify-content:start">
+              <button class="btn btn-sm btn-primary" type="button" data-action="ai-generate" data-id="${escAttr(item.id||'')}">${icons.spark}AI生成初稿</button>
+              <select class="select" data-ai-refine data-id="${escAttr(item.id||'')}" aria-label="AI润色操作" style="width:auto;min-width:150px"><option value="">AI润色…</option><option value="polish">润色表达</option><option value="deai">去AI味</option><option value="shorten">缩短到200字</option><option value="hook">加方向性钩子</option></select>
+              <button class="btn btn-sm" type="button" data-action="ai-check" data-id="${escAttr(item.id||'')}">AI深度检查</button>
+            </div>
             <textarea class="body-editor" data-draft-field="body" data-id="${escAttr(item.id||'')}" placeholder="从一句真实的话开始……">${esc(item.body||'')}</textarea>
             <div class="editor-meta"><label class="field-label">封面构想</label><span class="word-count">先有画面，再放文字</span></div>
             <div class="cover-row"><input class="input" data-draft-field="coverIdea" data-id="${escAttr(item.id||'')}" value="${escAttr(item.coverIdea||'')}" placeholder="例如：停车场里拿红笔圈出一辆车"><select class="select" data-draft-field="coverType" data-id="${escAttr(item.id||'')}">${coverOptions(item.coverType||'其他')}</select></div>
@@ -1152,7 +1400,7 @@
             <h3 class="review-title"><span>发布前 checklist</span><span class="word-count" id="check-count-${escAttr(item.id||'')}">${checked}/6</span></h3>
             <div class="checklist">${CHECKLIST_LABELS.map((label,i)=>`<label class="check-item"><input type="checkbox" data-check-index="${i}" data-id="${escAttr(item.id||'')}" ${checklist[i]?'checked':''}><span>${label}</span></label>`).join('')}</div>
             <div class="progress"><div class="progress-bar" id="progress-${escAttr(item.id||'')}" style="width:${checked/6*100}%"></div></div>
-            <div class="review-actions"><button class="btn btn-primary" data-action="publish-draft" data-id="${escAttr(item.id||'')}">${icons.published}发布并归档</button><button class="btn icon-btn" data-action="duplicate-draft" data-id="${escAttr(item.id||'')}" title="复制稿件">⎘</button></div>
+            <div class="review-actions"><button class="btn btn-primary" data-action="publish-draft" data-id="${escAttr(item.id||'')}">${icons.download}导出发布</button><button class="btn icon-btn" data-action="duplicate-draft" data-id="${escAttr(item.id||'')}" title="复制稿件">⎘</button></div>
           </aside>
         </article>`;
       }
@@ -1175,7 +1423,7 @@
             ${statCard('平均互动率',avgEng.toFixed(1)+'%','赞藏评享 / 浏览',icons.principles)}
           </div>
           <div class="section-head"><div><h2>发布记录</h2><p>点击卡片查看全文与复盘；切换24h、7d、30d可直接录入反馈。</p></div><div class="filters"><span class="badge badge-green">爆款 ${hits}</span><span class="badge badge-red">扑街 ${published.filter(p=>p?.mark==='flop').length}</span></div></div>
-          <div class="published-grid">${published.length ? published.map(renderPublishedCard).join('') : emptyState('还没有发布记录','稿件完成检查后，点击“发布并归档”。')}</div>
+          <div class="published-grid">${published.length ? published.map(renderPublishedCard).join('') : emptyState('还没有发布记录','稿件完成检查后，点击“导出发布”。')}</div>
         `;
       }
 
@@ -1286,7 +1534,7 @@
         const enabled = principles.filter(p=>p.enabled).length;
         const progress = principles.length ? enabled/principles.length*100 : 0;
         return `
-          <section class="hero" style="grid-template-columns:1fr minmax(250px,.55fr)"><div><h2>原则不是墙上的字，<span class="hero-accent">是发布前的刹车</span></h2><p>点击文字即可改，开关用于临时停用。所有修改都会自动保存在当前浏览器。</p></div><div class="principle-progress"><div class="progress"><div class="progress-bar" style="width:${progress}%"></div></div><strong>${enabled}/${principles.length} 启用</strong></div></section>
+          <section class="hero" style="grid-template-columns:1fr minmax(250px,.55fr)"><div><h2>原则不是墙上的字，<span class="hero-accent">是发布前的刹车</span></h2><p>点击文字即可改，开关用于临时停用。所有修改都会自动保存到本地 SQLite 数据库。</p></div><div class="principle-progress"><div class="progress"><div class="progress-bar" style="width:${progress}%"></div></div><strong>${enabled}/${principles.length} 启用</strong></div></section>
           <div class="section-head"><div><h2>运营原则清单</h2><p>默认20条，可编辑、可停用。</p></div></div>
           <div class="principles">${principles.length?principles.map((p,i)=>`<div class="principle-item"><div class="principle-num">${String(i+1).padStart(2,'0')}</div><input class="principle-input" data-principle-text data-id="${escAttr(p.id||'')}" value="${escAttr(p.text||'')}"><input class="principle-toggle" type="checkbox" data-principle-toggle data-id="${escAttr(p.id||'')}" ${p.enabled?'checked':''} title="启用/停用"></div>`).join(''):emptyState('暂无运营原则','可点击右上角恢复默认20条。')}</div>
         `;
@@ -1354,7 +1602,7 @@
             <div class="field full"><label>备注</label><textarea class="textarea" name="note" placeholder="切入角度、读者问题或素材线索">${esc(data.note||'')}</textarea></div>
             <div class="field full"><label>四维评分</label><div class="score-sliders">${Object.entries(SCORE_LABELS).map(([key,label])=>`<div class="slider-field"><div class="slider-label"><span>${label}</span><strong data-score-value="${key}">${Number(data.scores?.[key]||0)}</strong></div><input type="range" min="0" max="5" step="1" name="score_${key}" value="${Number(data.scores?.[key]||0)}"></div>`).join('')}</div><div class="score-summary"><div><strong id="modalScore">${ideaScore(data)}</strong> / 20</div><span id="modalRecommend" class="badge ${ideaScore(data)>=12?'badge-green':'badge-gray'}">${ideaScore(data)>=12?'推荐制作':'未达推荐线'}</span></div></div>
           </div></div>
-          <div class="modal-foot"><button type="button" class="btn" data-close-modal>取消</button><button type="submit" class="btn btn-primary">${idea?'保存修改':'加入创意池'}</button></div>
+          <div class="modal-foot"><button type="button" class="btn" data-action="ai-score-idea">${icons.spark}AI辅助打分</button><button type="button" class="btn" data-close-modal>取消</button><button type="submit" class="btn btn-primary">${idea?'保存修改':'加入创意池'}</button></div>
         </form></div></div>`;
         refreshIdeaSectionOptions(activeIdeaFormDraft.sectionId);
       }
@@ -1411,16 +1659,131 @@
         if(['title','body','coverType'].includes(field)){const previewTagList=document.getElementById(`preview-tags-${id}`);if(previewTagList)previewTagList.innerHTML=previewTags(draft).map(tag=>`<span>${esc(tag)}</span>`).join('');}
       }
 
-      function publishDraft(id) {
+      function showAiImageModal(id) {
+        const draft = state.drafts.find(item=>item.id===id);
+        if (!draft) return;
+        if ((draft.images||[]).length >= MAX_BODY_IMAGES) { toast('最多添加 9 张配图','','warn'); return; }
+        document.getElementById('modalRoot').innerHTML = `<div class="modal-backdrop" data-modal-backdrop><div class="modal" role="dialog" aria-modal="true" aria-labelledby="aiImageModalTitle" style="width:min(560px,100%)"><form id="aiImageForm" data-id="${escAttr(id)}">
+          <div class="modal-head"><h3 id="aiImageModalTitle">AI 生成配图</h3><button type="button" class="btn icon-btn btn-ghost" data-close-modal aria-label="关闭">${icons.close}</button></div>
+          <div class="modal-body"><div class="field"><label for="aiImageDesc">中文图片描述</label><textarea class="textarea" id="aiImageDesc" name="desc" rows="5" required autofocus placeholder="例如：一位汽车行业老兵在昏暗车库里，用笔记本电脑调试 AI 生图工具，纪实摄影风格"></textarea><div class="ai-image-status" id="aiImageStatus">AI 会先转换为英文提示词，再调用 Gemini 生成图片。</div></div></div>
+          <div class="modal-foot"><button type="button" class="btn" data-close-modal>取消</button><button type="submit" class="btn btn-primary">${icons.spark}开始生成</button></div>
+        </form></div></div>`;
+      }
+
+      async function generateDraftImage(id, desc, button) {
+        const draft = state.drafts.find(item=>item.id===id);
+        if (!draft) return;
+        if ((draft.images||[]).length >= MAX_BODY_IMAGES) { toast('最多添加 9 张配图','','warn'); return; }
+        const status = document.getElementById('aiImageStatus');
+        await withBusy(button,'生成中…',async()=>{
+          if (status) { status.classList.add('busy'); status.textContent='正在把中文描述转换为英文提示词…'; }
+          const promptResult = await apiRequest('/api/ai/image-prompt',{method:'POST',body:JSON.stringify({desc})});
+          const prompt = String(promptResult.content||'').trim();
+          if (!prompt) throw new Error('AI 未返回有效的英文提示词');
+          if (status) status.textContent=`英文提示词已生成，Gemini 正在生成图片（最长约 180 秒）…\n${prompt}`;
+          const image = await apiRequest('/api/ai/image',{method:'POST',body:JSON.stringify({prompt,draftId:id})});
+          draft.images = Array.isArray(draft.images) ? draft.images : [];
+          if (!draft.images.includes(image.path)) draft.images.push(image.path);
+          draft.updatedAt=nowISO();
+          closeModal(false);saveState(true);render();
+          toast('AI 配图已生成',`${image.name} · ${(Number(image.size||0)/1024/1024).toFixed(2)} MB`);
+        });
+      }
+
+      async function withBusy(button, busyText, task) {
+        if (button?.disabled) return;
+        const original = button?.innerHTML;
+        if (button) { button.disabled=true; button.textContent=busyText; }
+        try { return await task(); }
+        catch (error) { console.error(error); toast('操作失败',error.message||'请稍后重试','error'); }
+        finally { if(button){button.disabled=false;button.innerHTML=original;} }
+      }
+
+      function applyGeneratedCopy(draft, content) {
+        const text = String(content||'').replace(/^```[a-z]*\s*|```$/gi,'').trim();
+        const titleMatch = text.match(/(?:^|\n)标题[：:]\s*([^\n]+)/);
+        const bodyMatch = text.match(/(?:^|\n)正文[：:]\s*([\s\S]+)/);
+        if (titleMatch) draft.title=titleMatch[1].trim().replace(/^《|》$/g,'');
+        draft.body=(bodyMatch?.[1]||text.replace(/(?:^|\n)标题[：:]\s*[^\n]+/,'')).trim();
+        draft.updatedAt=nowISO();
+      }
+
+      async function runAiGenerate(id, button) {
+        const draft=state.drafts.find(item=>item.id===id);if(!draft)return;
+        await withBusy(button,'生成中…',async()=>{
+          const result=await apiRequest('/api/ai/generate',{method:'POST',body:JSON.stringify({keywords:draft.title,section:getSection(draft.sectionId).name,points:draft.body})});
+          applyGeneratedCopy(draft,result.content);saveState(true);render();toast('AI初稿已生成',`模型：${result.model||'glm-5.2'}`);
+        });
+      }
+
+      async function runAiRefine(id, operation, select) {
+        const draft=state.drafts.find(item=>item.id===id);if(!draft||!operation)return;
+        const textarea=document.querySelector(`textarea[data-draft-field="body"][data-id="${CSS.escape(id)}"]`);
+        const start=textarea?.selectionStart??0;const end=textarea?.selectionEnd??0;
+        const hasSelection=end>start;const source=hasSelection?draft.body.slice(start,end):draft.body;
+        if(!source.trim()){toast('没有可润色的文字','','warn');if(select)select.value='';return;}
+        if(select)select.disabled=true;
+        try{
+          const result=await apiRequest('/api/ai/refine',{method:'POST',body:JSON.stringify({text:source,operation,title:draft.title})});
+          draft.body=hasSelection?draft.body.slice(0,start)+result.content+draft.body.slice(end):result.content;
+          draft.updatedAt=nowISO();saveState(true);render();toast('AI润色完成',`模型：${result.model||'glm-5.2'}`);
+        }catch(error){toast('AI润色失败',error.message,'error');}
+        finally{if(select){select.disabled=false;select.value='';}}
+      }
+
+      async function runAiCheck(id, button) {
+        const draft=state.drafts.find(item=>item.id===id);if(!draft)return;
+        if(!draft.body.trim()){toast('正文还是空的','','warn');return;}
+        await withBusy(button,'检查中…',async()=>{
+          const result=await apiRequest('/api/ai/check',{method:'POST',body:JSON.stringify({body:draft.body})});
+          document.getElementById('modalRoot').innerHTML=`<div class="modal-backdrop" data-modal-backdrop><div class="modal" role="dialog" aria-modal="true"><div class="modal-head"><h3>AI味深度检查</h3><button type="button" class="btn icon-btn btn-ghost" data-close-modal>${icons.close}</button></div><div class="modal-body"><p class="published-detail-body">${esc(result.content)}</p></div><div class="modal-foot"><button class="btn btn-primary" data-close-modal>关闭</button></div></div></div>`;
+        });
+      }
+
+      async function scoreIdeaForm(button) {
+        const form=document.getElementById('ideaForm');if(!form)return;
+        const title=String(form.elements.title.value||'').trim();if(!title){toast('先填写创意标题','','warn');return;}
+        await withBusy(button,'打分中…',async()=>{
+          const result=await apiRequest('/api/ai/score',{method:'POST',body:JSON.stringify({title,section:getSection(form.elements.sectionId.value).name})});
+          if(!result.scores)throw new Error(`模型未返回结构化评分：${result.content}`);
+          const mapping={intensity:result.scores.intensity,whitespace:result.scores.gap,persona:result.scores.persona,timeliness:result.scores.timing};
+          Object.entries(mapping).forEach(([key,value])=>{
+            form.elements[`score_${key}`].value=value;
+            form.querySelector(`[data-score-value="${key}"]`).textContent=value;
+            if(activeIdeaFormDraft)activeIdeaFormDraft.scores[key]=value;
+          });
+          const total=Object.values(mapping).reduce((sum,value)=>sum+Number(value||0),0);
+          document.getElementById('modalScore').textContent=total;
+          const badge=document.getElementById('modalRecommend');badge.textContent=total>=12?'推荐制作':'未达推荐线';badge.className=`badge ${total>=12?'badge-green':'badge-gray'}`;
+          toast('AI评分已填入',result.scores.reason||'可继续手动调整');
+        });
+      }
+
+      async function scanGeminiImages(button) {
+        await withBusy(button,'扫描中…',async()=>{
+          const files=await apiRequest('/api/scans/gemini');
+          document.getElementById('modalRoot').innerHTML=`<div class="modal-backdrop" data-modal-backdrop><div class="modal" role="dialog" aria-modal="true"><div class="modal-head"><h3>Gemini 生成图</h3><button type="button" class="btn icon-btn btn-ghost" data-close-modal>${icons.close}</button></div><div class="modal-body">${files.length?`<div class="principles">${files.map(file=>`<div class="principle-item"><div class="principle-num">PNG</div><div style="min-width:0"><strong>${esc(file.name)}</strong><div class="word-count">${(Number(file.size||0)/1024/1024).toFixed(2)} MB · ${formatFullDate(file.modified_at)}</div><div class="word-count" style="overflow-wrap:anywhere">${esc(file.path)}</div></div></div>`).join('')}</div>`:emptyState('没有找到 Gemini 图片','Downloads 目录中暂无 Gemini_Generated_Image*.png')}</div><div class="modal-foot"><button class="btn btn-primary" data-close-modal>关闭</button></div></div></div>`;
+        });
+      }
+
+      async function publishDraft(id, button) {
         const draft = state.drafts.find(d=>d.id===id); if (!draft) return;
         const missing = (draft.checklist||[]).filter(v=>!v).length;
-        if (missing) { toast('还不能发布',`还有 ${missing} 项 checklist 未完成`,'warn'); return; }
+        if (missing) { toast('还不能导出',`还有 ${missing} 项 checklist 未完成`,'warn'); return; }
         if (!String(draft.title||'').trim() || !String(draft.body||'').trim()) { toast('标题和正文不能为空','','warn'); return; }
-        const sourceIdeaId = draft.sourceIdeaId||draft.ideaId||null;
-        const sourceIdea = state.ideas.find(i=>i?.id===sourceIdeaId);
-        state.published.unshift({ id:makeId('pub'), sourceIdeaId, title:draft.title||'', body:draft.body||'', sectionId:draft.sectionId||sourceIdea?.sectionId||state.sections?.[0]?.id||'', coverIdea:draft.coverIdea||'', coverType:draft.coverType||'其他', coverImage:draft.coverImage||'', images:[...(draft.images||[])], publishedAt:nowISO(), platform:'小红书', metrics:{'24h':blankMetrics(),'7d':blankMetrics(),'30d':blankMetrics()}, mark:'normal', reviewNote:'', createdAt:draft.createdAt||nowISO() });
-        state.drafts = state.drafts.filter(d=>d.id!==id);
-        saveState(true); render(); toast('已发布并归档','请在24小时后补录第一轮数据');
+        if (!apiReady) { toast('后端未连接','请先运行 node server.js 并刷新页面','warn'); return; }
+        await withBusy(button,'正在导出…',async()=>{
+          const known=syncedCollections.drafts.has(id);
+          const saved=await apiRequest(known?`/api/drafts/${encodeURIComponent(id)}`:'/api/drafts',{method:known?'PUT':'POST',body:JSON.stringify(draftToApi(draft))});
+          syncedCollections.drafts.set(id,clone(draftFromApi(saved)));
+          const exported=await apiRequest(`/api/exports/${encodeURIComponent(id)}`);
+          const publishedRaw=await apiRequest('/api/published',{method:'POST',body:JSON.stringify({...publishedToApi({id:makeId('pub'),draftId:id,title:draft.title,sectionId:draft.sectionId,body:draft.body,tags:extractTags(draft),coverImage:draft.coverImage,images:draft.images,publishedAt:nowISO(),platform:'小红书',metrics:{'24h':blankMetrics(),'7d':blankMetrics(),'30d':blankMetrics()},mark:'normal',reviewNote:'',createdAt:draft.createdAt}),draft_id:id})});
+          await apiRequest(`/api/drafts/${encodeURIComponent(id)}`,{method:'DELETE'});
+          const published=publishedFromApi(publishedRaw);
+          state.published.unshift(published);state.drafts=state.drafts.filter(item=>item.id!==id);
+          syncedCollections.published.set(published.id,clone(published));syncedCollections.drafts.delete(id);
+          render();toast('发布文件已导出',exported.folderPath);
+        });
       }
 
       function confirmAction(title, detail, onConfirm, dangerous=true) {
@@ -1485,6 +1848,7 @@
         }
         const actions = {
           'add-idea':()=>showIdeaModal(), 'auto-idea':()=>showIdeaModal(null,'auto'), 'edit-idea':()=>showIdeaModal(id), 'adopt-idea':()=>adoptIdea(id),
+          'ai-score-idea':()=>scoreIdeaForm(actionTarget),
           'delete-idea':()=>confirmAction('删除这条创意？','对应稿件和发布记录不会被删除。',()=>{state.ideas=state.ideas.filter(i=>i.id!==id);saveState(true);render();toast('创意已删除');}),
           'add-draft':()=>showDraftModal(),
           'select-draft':()=>selectActiveDraft(id),
@@ -1494,7 +1858,11 @@
           'remove-cover-image':()=>{const d=state.drafts.find(x=>x.id===id);if(d){d.coverImage='';d.updatedAt=nowISO();saveState(true);render();toast('封面图已删除');}},
           'select-body-images':()=>actionTarget.closest('[data-draft-card]')?.querySelector('[data-body-images-input]')?.click(),
           'remove-body-image':()=>{const d=state.drafts.find(x=>x.id===id);const index=Number(actionTarget.dataset.index);if(d&&Number.isInteger(index)&&index>=0&&index<d.images.length){d.images.splice(index,1);d.updatedAt=nowISO();saveState(true);render();toast('配图已删除');}},
-          'publish-draft':()=>publishDraft(id),
+          'ai-generate-image':()=>showAiImageModal(id),
+          'scan-gemini':()=>scanGeminiImages(actionTarget),
+          'ai-generate':()=>runAiGenerate(id,actionTarget),
+          'ai-check':()=>runAiCheck(id,actionTarget),
+          'publish-draft':()=>publishDraft(id,actionTarget),
           'view-published-cover':()=>{const pub=state.published.find(p=>p.id===id);if(pub)showImageModal(pub.coverImage,pub.title||'封面图预览');},
           'view-published-detail':()=>showPublishedDetail(id),
           'delete-published':()=>confirmAction('删除这条发布记录？','所有阶段数据会一起删除，建议先导出备份。',()=>{state.published=state.published.filter(p=>p.id!==id);saveState(true);render();toast('发布记录已删除');}),
@@ -1532,6 +1900,10 @@
       });
 
       document.addEventListener('change', event => {
+        if (event.target.matches('[data-ai-refine]')) {
+          runAiRefine(event.target.dataset.id,event.target.value,event.target);
+          return;
+        }
         if (event.target.matches('#ideaForm [data-idea-section]')) {
           const sectionId=String(event.target.value||'');
           if(!stateItems('sections').some(section=>section?.id===sectionId)){refreshIdeaSectionOptions(activeIdeaFormDraft?.sectionId||'');toast('请选择有效板块','','warn');return;}
@@ -1566,6 +1938,12 @@
 
       document.addEventListener('submit', event => {
         event.preventDefault();
+        if (event.target.id==='aiImageForm') {
+          const form=event.target;const desc=String(new FormData(form).get('desc')||'').trim();
+          if(!desc){toast('请输入图片描述','','warn');return;}
+          generateDraftImage(form.dataset.id,desc,form.querySelector('[type="submit"]'));
+          return;
+        }
         if (event.target.id==='ideaForm') {
           const form=event.target;const fd=new FormData(form);const editId=form.dataset.editId;
           const ideas=stateItems('ideas');const original=editId?ideas.find(i=>i?.id===editId):null;
@@ -1606,8 +1984,8 @@
         subscribe: callback => { if(typeof callback!=='function')throw new Error('callback 必须是函数');subscribers.add(callback);return()=>subscribers.delete(callback); }
       });
 
-      saveState(true);
       render();
+      hydrateState();
     })();
   </script>
 </body>
