@@ -712,9 +712,13 @@
           published: Array.isArray(raw.published) ? raw.published : base.published,
           principles: Array.isArray(raw.principles) && raw.principles.length ? raw.principles : base.principles
         };
-        merged.ideas = merged.ideas.map(i => ({ note:'', sourceMode:'manual', source:'手动记录', status:'pending', scores:{intensity:0,whitespace:0,persona:0,timeliness:0}, createdAt:nowISO(), ...i, scores:{intensity:0,whitespace:0,persona:0,timeliness:0,...(i.scores||{})} }));
+        merged.ideas = merged.ideas.map(i => {
+          const item = i && typeof i === 'object' ? i : {};
+          return { note:'', sourceMode:'manual', source:'手动记录', status:'pending', scores:{intensity:0,whitespace:0,persona:0,timeliness:0}, createdAt:nowISO(), ...item, scores:{intensity:0,whitespace:0,persona:0,timeliness:0,...(item.scores||{})} };
+        });
         merged.drafts = merged.drafts.map(d => {
-          const normalized = { body:'', coverIdea:'', coverType:'其他', coverImage:'', images:[], checklist:Array(6).fill(false), createdAt:nowISO(), updatedAt:nowISO(), ...d, sourceIdeaId:d.sourceIdeaId||d.ideaId||null, coverImage:safeImageSrc(d.coverImage), images:Array.isArray(d.images)?d.images.map(safeImageSrc).filter(Boolean).slice(0,MAX_BODY_IMAGES):[], checklist:CHECKLIST_LABELS.map((_,i)=>Boolean(d.checklist?.[i])) };
+          const item = d && typeof d === 'object' ? d : {};
+          const normalized = { body:'', coverIdea:'', coverType:'其他', coverImage:'', images:[], checklist:Array(6).fill(false), createdAt:nowISO(), updatedAt:nowISO(), ...item, sourceIdeaId:item.sourceIdeaId||item.ideaId||null, coverImage:safeImageSrc(item.coverImage), images:Array.isArray(item.images)?item.images.map(safeImageSrc).filter(Boolean).slice(0,MAX_BODY_IMAGES):[], checklist:CHECKLIST_LABELS.map((_,i)=>Boolean(item.checklist?.[i])) };
           delete normalized.ideaId;
           return normalized;
         });
@@ -966,6 +970,19 @@
             ${activeDraft?renderDraftCard(activeDraft):`<section class="card draft-detail draft-detail-empty">${emptyState('还没有稿件，点击左下角新建','')}</section>`}
           </div>
         `;
+      }
+
+      function selectActiveDraft(id) {
+        const drafts = stateItems('drafts');
+        const activeDraft = drafts.find(draft=>draft?.id===id);
+        if (!activeDraft) { toast('未找到这篇备选稿','可能已被删除或数据已更新','warn'); return; }
+        state.activeDraftId = activeDraft.id;
+        saveState();
+        const list = document.getElementById('draftItems');
+        const currentDetail = document.querySelector('.draft-workspace [data-draft-card], .draft-workspace .draft-detail-empty');
+        if (!list || !currentDetail) { render(); return; }
+        list.innerHTML = renderDraftSidebarItems();
+        currentDetail.outerHTML = renderDraftCard(activeDraft);
       }
 
       function aiCheck(text) {
@@ -1313,7 +1330,9 @@
       }
 
       function showIdeaModal(id=null, mode='manual') {
-        const idea = id ? state.ideas.find(i=>i?.id===id) : null;
+        const ideas = stateItems('ideas');
+        const sections = stateItems('sections');
+        const idea = id ? ideas.find(i=>i?.id===id) : null;
         if (id && !idea) { toast('未找到这条创意','可能已被删除或数据已更新','warn'); return; }
         const autoSeeds = [
           {title:'为什么AI生成的车图一眼就假？',source:'热点雷达 · AI绘图',note:'从轮胎、车标、反光三个破绽切入。'},
@@ -1321,22 +1340,32 @@
           {title:'预算不涨，怎么把选车范围砍到三台？',source:'销量榜波动',note:'用销量、保有量和场景做三步筛选。'}
         ];
         const seed = autoSeeds[Math.floor(Math.random()*autoSeeds.length)];
-        const defaults = { title:mode==='auto'?seed.title:'', sourceMode:mode, source:mode==='auto'?seed.source:'手动记录', sectionId:state.sections?.[0]?.id||'', scores:{intensity:mode==='auto'?3:0,whitespace:mode==='auto'?3:0,persona:mode==='auto'?4:0,timeliness:mode==='auto'?4:0}, status:'pending', note:mode==='auto'?seed.note:'' };
+        const defaults = { title:mode==='auto'?seed.title:'', sourceMode:mode, source:mode==='auto'?seed.source:'手动记录', sectionId:sections[0]?.id||'', scores:{intensity:mode==='auto'?3:0,whitespace:mode==='auto'?3:0,persona:mode==='auto'?4:0,timeliness:mode==='auto'?4:0}, status:'pending', note:mode==='auto'?seed.note:'' };
         const data = { ...defaults, ...(idea||{}), scores:{...defaults.scores,...(idea?.scores||{})} };
-        const sectionOptions = renderSectionOptions(data.sectionId);
+        activeIdeaFormDraft = clone(data);
         document.getElementById('modalRoot').innerHTML = `<div class="modal-backdrop" data-modal-backdrop><div class="modal" role="dialog" aria-modal="true" aria-labelledby="ideaModalTitle"><form id="ideaForm" data-edit-id="${escAttr(idea?.id||'')}">
           <div class="modal-head"><h3 id="ideaModalTitle">${idea?'编辑创意':mode==='auto'?'自动采集结果':'添加创意'}</h3><button type="button" class="btn icon-btn btn-ghost" data-close-modal aria-label="关闭">${icons.close}</button></div>
           <div class="modal-body"><div class="form-grid">
             <div class="field full"><label>录入方式</label><div class="mode-switch"><button type="button" class="mode-option ${data.sourceMode==='manual'?'active':''}" data-source-mode="manual">手动添加</button><button type="button" class="mode-option ${data.sourceMode==='auto'?'active':''}" data-source-mode="auto">自动采集</button></div><input type="hidden" name="sourceMode" value="${escAttr(data.sourceMode||'manual')}"></div>
             <div class="field full"><label>创意标题 *</label><input class="input" name="title" value="${escAttr(data.title||'')}" placeholder="一句话说清选题方向" required autofocus></div>
             <div class="field"><label>来源</label><input class="input" name="source" value="${escAttr(data.source||'')}" placeholder="热榜、评论、灵感……"></div>
-            <div class="field"><label>板块</label><select class="select" name="sectionId" required ${state.sections?.length?'':'disabled'}>${sectionOptions}</select></div>
+            <div class="field"><label>板块</label><select class="select" name="sectionId" data-idea-section required></select></div>
             <div class="field"><label>状态</label><select class="select" name="status">${[['pending','待评估'],['candidate','备选'],['adopted','采用'],['rejected','淘汰']].map(([v,n])=>`<option value="${v}" ${v===data.status?'selected':''}>${n}</option>`).join('')}</select></div>
             <div class="field full"><label>备注</label><textarea class="textarea" name="note" placeholder="切入角度、读者问题或素材线索">${esc(data.note||'')}</textarea></div>
             <div class="field full"><label>四维评分</label><div class="score-sliders">${Object.entries(SCORE_LABELS).map(([key,label])=>`<div class="slider-field"><div class="slider-label"><span>${label}</span><strong data-score-value="${key}">${Number(data.scores?.[key]||0)}</strong></div><input type="range" min="0" max="5" step="1" name="score_${key}" value="${Number(data.scores?.[key]||0)}"></div>`).join('')}</div><div class="score-summary"><div><strong id="modalScore">${ideaScore(data)}</strong> / 20</div><span id="modalRecommend" class="badge ${ideaScore(data)>=12?'badge-green':'badge-gray'}">${ideaScore(data)>=12?'推荐制作':'未达推荐线'}</span></div></div>
           </div></div>
           <div class="modal-foot"><button type="button" class="btn" data-close-modal>取消</button><button type="submit" class="btn btn-primary">${idea?'保存修改':'加入创意池'}</button></div>
         </form></div></div>`;
+        refreshIdeaSectionOptions(activeIdeaFormDraft.sectionId);
+      }
+
+      function refreshIdeaSectionOptions(selectedId='') {
+        const select = document.querySelector('#ideaForm [data-idea-section]');
+        if (!select) return;
+        const sections = stateItems('sections');
+        select.innerHTML = renderSectionOptions(selectedId);
+        select.disabled = !sections.length;
+        if (activeIdeaFormDraft) activeIdeaFormDraft.sectionId = select.value || '';
       }
 
       function showDraftModal() {
@@ -1348,6 +1377,7 @@
         if (!root.firstElementChild) return;
         root.innerHTML='';
         pendingConfirmAction = null;
+        activeIdeaFormDraft = null;
         if (rerender) render(); // render() 会根据 activeView 调用当前模块对应的 renderXXX()
       }
 
@@ -1431,7 +1461,7 @@
         const sectionButton = event.target.closest('[data-section-nav]');
         if (sectionButton) {
           const sectionId=sectionButton.dataset.sectionNav;
-          if(sectionId!=='all'&&!state.sections.some(s=>s.id===sectionId))return;
+          if(sectionId!=='all'&&!stateItems('sections').some(s=>s.id===sectionId))return;
           activeView='ideas';state.settings.activeView='ideas';state.settings.sectionFilter=sectionId;saveState();
           document.getElementById('sidebar').classList.remove('open');render();window.scrollTo({top:0,behavior:'smooth'});return;
         }
@@ -1442,7 +1472,7 @@
         const stage = event.target.closest('[data-metric-stage]');
         if (stage) { activeMetricStages[stage.dataset.id]=stage.dataset.metricStage;render();return; }
         const mode = event.target.closest('[data-source-mode]');
-        if (mode) { const form=document.getElementById('ideaForm');form.elements.sourceMode.value=mode.dataset.sourceMode;form.querySelectorAll('.mode-option').forEach(b=>b.classList.toggle('active',b===mode));return; }
+        if (mode) { const form=document.getElementById('ideaForm');if(!form)return;form.elements.sourceMode.value=mode.dataset.sourceMode;if(activeIdeaFormDraft)activeIdeaFormDraft.sourceMode=mode.dataset.sourceMode;form.querySelectorAll('.mode-option').forEach(b=>b.classList.toggle('active',b===mode));return; }
         const actionTarget = event.target.closest('[data-action]');
         const action = actionTarget?.dataset.action;
         const id = actionTarget?.dataset.id;
@@ -1457,7 +1487,7 @@
           'add-idea':()=>showIdeaModal(), 'auto-idea':()=>showIdeaModal(null,'auto'), 'edit-idea':()=>showIdeaModal(id), 'adopt-idea':()=>adoptIdea(id),
           'delete-idea':()=>confirmAction('删除这条创意？','对应稿件和发布记录不会被删除。',()=>{state.ideas=state.ideas.filter(i=>i.id!==id);saveState(true);render();toast('创意已删除');}),
           'add-draft':()=>showDraftModal(),
-          'select-draft':()=>{if(state.drafts.some(d=>d?.id===id)){state.activeDraftId=id;saveState();render();}},
+          'select-draft':()=>selectActiveDraft(id),
           'delete-draft':()=>confirmAction('删除这篇备选稿？','删除后无法恢复，原创意仍会保留。',()=>{state.drafts=state.drafts.filter(d=>d.id!==id);saveState(true);render();toast('备选稿已删除');}),
           'duplicate-draft':()=>{const d=state.drafts.find(x=>x.id===id);if(d){if(storedImageBytes()+draftImageBytes(d)>STORAGE_IMAGE_LIMIT){toast('图片总大小将超过 3MB','请先删除部分图片再复制稿件','warn');return;}const copy=clone(d);copy.id=makeId('draft');copy.title+=' · 副本';copy.ideaId=null;copy.createdAt=copy.updatedAt=nowISO();state.drafts.unshift(copy);saveState(true);render();toast('稿件副本已创建');}},
           'select-cover-image':()=>actionTarget.closest('[data-draft-card]')?.querySelector('[data-cover-image-input]')?.click(),
@@ -1481,12 +1511,19 @@
       });
 
       document.addEventListener('input', event => {
+        if (event.target.matches('[data-draft-search]')) {
+          draftSearchQuery=event.target.value||'';
+          const list=document.getElementById('draftItems');
+          if(list)list.innerHTML=renderDraftSidebarItems();
+          return;
+        }
         const range = event.target.closest('#ideaForm input[type="range"]');
         if (range) {
           const key=range.name.replace('score_',''); const form=document.getElementById('ideaForm');
-          form.querySelector(`[data-score-value="${key}"]`).textContent=range.value;
+          if(!form)return;
+          const scoreValue=form.querySelector(`[data-score-value="${key}"]`);if(scoreValue)scoreValue.textContent=range.value;
           const total=Object.keys(SCORE_LABELS).reduce((s,k)=>s+Number(form.elements[`score_${k}`].value),0);
-          document.getElementById('modalScore').textContent=total;const badge=document.getElementById('modalRecommend');badge.textContent=total>=12?'推荐制作':'未达推荐线';badge.className=`badge ${total>=12?'badge-green':'badge-gray'}`;
+          const modalScore=document.getElementById('modalScore');const badge=document.getElementById('modalRecommend');if(modalScore)modalScore.textContent=total;if(badge){badge.textContent=total>=12?'推荐制作':'未达推荐线';badge.className=`badge ${total>=12?'badge-green':'badge-gray'}`;}
           return;
         }
         if (event.target.matches('[data-draft-field]')) updateDraftField(event.target.dataset.id,event.target.dataset.draftField,event.target.value);
@@ -1495,6 +1532,12 @@
       });
 
       document.addEventListener('change', event => {
+        if (event.target.matches('#ideaForm [data-idea-section]')) {
+          const sectionId=String(event.target.value||'');
+          if(!stateItems('sections').some(section=>section?.id===sectionId)){refreshIdeaSectionOptions(activeIdeaFormDraft?.sectionId||'');toast('请选择有效板块','','warn');return;}
+          if(activeIdeaFormDraft)activeIdeaFormDraft.sectionId=sectionId;
+          return;
+        }
         if (event.target.id==='importFile') {
           const file=event.target.files?.[0];if(!file)return;
           file.text().then(text=>{const raw=JSON.parse(text);if(!raw||!Array.isArray(raw.ideas)||!Array.isArray(raw.drafts)||!Array.isArray(raw.published))throw new Error('结构不完整');state=normalizeState(raw);activeView=navItems.some(item=>item.id===state.settings.activeView)?state.settings.activeView:'ideas';state.settings.activeView=activeView;saveState(true);render();toast('数据导入成功',`已恢复 ${state.ideas.length+state.drafts.length+state.published.length} 条内容记录`);}).catch(error=>toast('导入失败',error.message||'文件不是有效备份','error')).finally(()=>{event.target.value='';});return;
@@ -1504,7 +1547,7 @@
         if (event.target.matches('[data-draft-field]')) updateDraftField(event.target.dataset.id,event.target.dataset.draftField,event.target.value);
         if (event.target.matches('[data-check-index]')) {
           const d=state.drafts.find(x=>x.id===event.target.dataset.id);if(!d)return;d.checklist[Number(event.target.dataset.checkIndex)]=event.target.checked;d.updatedAt=nowISO();saveState();
-          const checked=d.checklist.filter(Boolean).length;document.getElementById(`check-count-${d.id}`).textContent=`${checked}/6`;document.getElementById(`progress-${d.id}`).style.width=`${checked/6*100}%`;
+          const checked=d.checklist.filter(Boolean).length;const checkCount=document.getElementById(`check-count-${d.id}`);const progress=document.getElementById(`progress-${d.id}`);if(checkCount)checkCount.textContent=`${checked}/6`;if(progress)progress.style.width=`${checked/6*100}%`;
         }
         if (event.target.matches('[data-metric-field]')) {
           const p=state.published.find(x=>x?.id===event.target.dataset.id);if(!p)return;const stage=event.target.dataset.stage;p.metrics ||= {};p.metrics[stage]={...blankMetrics(),...(p.metrics?.[stage]||{})};p.metrics[stage][event.target.dataset.metricField]=Math.max(0,Number(event.target.value||0));saveState();
@@ -1525,8 +1568,11 @@
         event.preventDefault();
         if (event.target.id==='ideaForm') {
           const form=event.target;const fd=new FormData(form);const editId=form.dataset.editId;
-          const item={ id:editId||makeId('idea'), title:String(fd.get('title')).trim(), sourceMode:String(fd.get('sourceMode')), source:String(fd.get('source')||'').trim()||'手动记录', sectionId:String(fd.get('sectionId')||''), status:String(fd.get('status')), note:String(fd.get('note')||'').trim(), scores:Object.fromEntries(Object.keys(SCORE_LABELS).map(k=>[k,Number(fd.get(`score_${k}`))])), createdAt:editId?(state.ideas.find(i=>i.id===editId)?.createdAt||nowISO()):nowISO() };
-          if(!item.sectionId||!state.sections.some(section=>section?.id===item.sectionId)){toast('请选择有效板块','若列表为空，请先在设置中添加板块','warn');return;}
+          const ideas=stateItems('ideas');const original=editId?ideas.find(i=>i?.id===editId):null;
+          const item={ ...(original||{}), ...(activeIdeaFormDraft||{}), id:editId||makeId('idea'), title:String(fd.get('title')||'').trim(), sourceMode:String(fd.get('sourceMode')||'manual'), source:String(fd.get('source')||'').trim()||'手动记录', sectionId:String(fd.get('sectionId')||activeIdeaFormDraft?.sectionId||''), status:String(fd.get('status')||'pending'), note:String(fd.get('note')||'').trim(), scores:Object.fromEntries(Object.keys(SCORE_LABELS).map(k=>[k,Number(fd.get(`score_${k}`)||0)])), createdAt:original?.createdAt||nowISO(), updatedAt:nowISO() };
+          if(!item.title){toast('请填写创意标题','','warn');return;}
+          if(!item.sectionId||!stateItems('sections').some(section=>section?.id===item.sectionId)){toast('请选择有效板块','若列表为空，请先在设置中添加板块','warn');refreshIdeaSectionOptions(item.sectionId);return;}
+          if(!Array.isArray(state.ideas))state.ideas=[];
           if(editId){const idx=state.ideas.findIndex(i=>i?.id===editId);if(idx<0){toast('保存失败','原创意已不存在','error');return;}state.ideas[idx]=item;}else state.ideas.unshift(item);
           closeModal(false);if(item.status==='adopted')adoptIdea(item.id);else{saveState(true);render();toast(editId?'创意已更新':'创意已加入池中',ideaScore(item)>=12?'达到12分，推荐制作':'可以继续评估');}
         }
