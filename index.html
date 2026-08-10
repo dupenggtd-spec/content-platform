@@ -216,6 +216,9 @@
     .draft-sidebar-foot .btn { width:100%; }
     .draft-detail { overflow:hidden; }
     .draft-detail-inner { padding:22px; }
+    .draft-card { min-width:0; overflow:hidden; display:grid; grid-template-columns:minmax(0,1fr) minmax(280px,.55fr); }
+    .editor-pane,.review-pane { min-width:0; padding:22px; }
+    .review-pane { border-left:1px solid var(--border-soft); }
     .draft-detail-empty { min-height:480px; display:grid; place-items:center; }
     .draft-detail-empty .empty { width:100%; border:0; }
     .draft-detail-section { padding:20px 0; border-top:1px solid var(--border-soft); }
@@ -518,6 +521,8 @@
 
     @media (max-width: 1100px) {
       .draft-workspace { grid-template-columns:260px minmax(0,1fr); }
+      .draft-card { grid-template-columns:1fr; }
+      .review-pane { border-left:0; border-top:1px solid var(--border-soft); }
       .stats { grid-template-columns:repeat(2,1fr); }
       .hero { grid-template-columns:1fr; }
       .settings-grid { grid-template-columns:1fr; }
@@ -661,6 +666,13 @@
         if (Number.isNaN(date.getTime())) return '—';
         return new Intl.DateTimeFormat('zh-CN', { month:'2-digit', day:'2-digit', ...(withTime ? {hour:'2-digit', minute:'2-digit'} : {}) }).format(date);
       };
+      const formatFullDate = value => {
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return '—';
+        return new Intl.DateTimeFormat('zh-CN', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }).format(date);
+      };
+      const safeArray = value => Array.isArray(value) ? value.filter(item => item && typeof item === 'object') : [];
+      const stateItems = key => safeArray(state?.[key]);
 
       function defaultState() {
         const created1 = new Date(Date.now() - 1000*60*60*30).toISOString();
@@ -752,6 +764,7 @@
       let draftSearchQuery = '';
       let saveTimer = null;
       let pendingConfirmAction = null;
+      let activeIdeaFormDraft = null;
       const extensionModules = new Map();
       const subscribers = new Set();
 
@@ -768,21 +781,21 @@
         if (immediate) write(); else saveTimer = setTimeout(write, 220);
       }
 
-      function getSection(id) { return state.sections.find(s => s.id === id) || { name:'未分板块', icon:'📁', color:'#6b7280' }; }
+      function getSection(id) { return stateItems('sections').find(s => s?.id === id) || { name:'未分板块', icon:'📁', color:'#6b7280' }; }
       function renderSectionOptions(selectedId='') {
-        const sections = Array.isArray(state.sections) ? state.sections : [];
+        const sections = stateItems('sections');
         if (!sections.length) return '<option value="" selected disabled>请先在设置中添加板块</option>';
         const activeId = sections.some(section=>section?.id===selectedId) ? selectedId : sections[0]?.id;
         return sections.map(section=>`<option value="${escAttr(section?.id||'')}" ${section?.id===activeId?'selected':''}>${esc(section?.icon||'📁')} ${esc(section?.name||'未命名板块')}</option>`).join('');
       }
-      function ideaScore(idea) { return Object.values(idea.scores || {}).reduce((sum,n) => sum + Number(n || 0), 0); }
+      function ideaScore(idea) { return Object.values(idea?.scores || {}).reduce((sum,n) => sum + Number(n || 0), 0); }
       function latestMetrics(pub) {
-        for (const stage of ['30d','7d','24h']) if (Number(pub.metrics?.[stage]?.views || 0) > 0) return { stage, ...pub.metrics[stage] };
-        return { stage:'24h', ...(pub.metrics?.['24h'] || blankMetrics()) };
+        for (const stage of ['30d','7d','24h']) if (Number(pub?.metrics?.[stage]?.views || 0) > 0) return { stage, ...blankMetrics(), ...pub.metrics[stage] };
+        return { stage:'24h', ...blankMetrics(), ...(pub?.metrics?.['24h'] || {}) };
       }
       function engagement(metrics) {
-        const views = Number(metrics.views || 0);
-        return views ? ((Number(metrics.likes||0)+Number(metrics.saves||0)+Number(metrics.comments||0)+Number(metrics.shares||0))/views*100) : 0;
+        const views = Number(metrics?.views || 0);
+        return views ? ((Number(metrics?.likes||0)+Number(metrics?.saves||0)+Number(metrics?.comments||0)+Number(metrics?.shares||0))/views*100) : 0;
       }
       function statusBadge(status) {
         const map = { pending:['待评估','badge-gray'], candidate:['备选','badge-yellow'], adopted:['采用','badge-green'], rejected:['淘汰','badge-red'] };
@@ -804,13 +817,18 @@
       }
 
       function renderNav() {
-        const counts = { ideas:state.ideas.length, drafts:state.drafts.length, published:state.published.length, principles:state.principles.filter(p=>p.enabled).length };
-        document.getElementById('nav').innerHTML = navItems.map(item => `<button class="nav-item ${item.id===activeView?'active':''}" data-view="${item.id}"><span class="nav-icon">${item.icon}</span><span class="nav-name">${item.name}</span>${counts[item.id] !== undefined ? `<span class="nav-count">${counts[item.id]}</span>` : ''}</button>`).join('');
-        const sectionFilter = state.settings.sectionFilter || 'all';
-        const sectionCounts = state.ideas.reduce((result,idea) => { result[idea.sectionId]=(result[idea.sectionId]||0)+1;return result; },{});
-        document.getElementById('sectionNav').innerHTML = `
-          <button class="nav-item ${activeView==='ideas'&&sectionFilter==='all'?'active':''}" data-section-nav="all"><span class="nav-icon">◫</span><span class="nav-name">全部板块</span><span class="nav-count">${state.ideas.length}</span></button>
-          ${state.sections.map(section=>`<button class="nav-item ${activeView==='ideas'&&sectionFilter===section.id?'active':''}" data-section-nav="${escAttr(section.id)}"><span class="nav-icon">${esc(section.icon)}</span><span class="nav-name">${esc(section.name)}</span><span class="nav-count">${sectionCounts[section.id]||0}</span></button>`).join('')}`;
+        const ideas = stateItems('ideas');
+        const sections = stateItems('sections');
+        const counts = { ideas:ideas.length, drafts:stateItems('drafts').length, published:stateItems('published').length, principles:stateItems('principles').filter(p=>p.enabled).length };
+        const nav = document.getElementById('nav');
+        const sectionNav = document.getElementById('sectionNav');
+        if (!nav || !sectionNav) return;
+        nav.innerHTML = navItems.map(item => `<button class="nav-item ${item.id===activeView?'active':''}" data-view="${item.id}"><span class="nav-icon">${item.icon}</span><span class="nav-name">${item.name}</span>${counts[item.id] !== undefined ? `<span class="nav-count">${counts[item.id]}</span>` : ''}</button>`).join('');
+        const sectionFilter = state?.settings?.sectionFilter || 'all';
+        const sectionCounts = ideas.reduce((result,idea) => { result[idea.sectionId]=(result[idea.sectionId]||0)+1;return result; },{});
+        sectionNav.innerHTML = `
+          <button class="nav-item ${activeView==='ideas'&&sectionFilter==='all'?'active':''}" data-section-nav="all"><span class="nav-icon">◫</span><span class="nav-name">全部板块</span><span class="nav-count">${ideas.length}</span></button>
+          ${sections.map(section=>`<button class="nav-item ${activeView==='ideas'&&sectionFilter===section.id?'active':''}" data-section-nav="${escAttr(section.id)}"><span class="nav-icon">${esc(section.icon)}</span><span class="nav-name">${esc(section.name)}</span><span class="nav-count">${sectionCounts[section.id]||0}</span></button>`).join('')}`;
       }
 
       function topButtons() {
@@ -824,14 +842,21 @@
       }
 
       function render() {
+        if (!state || typeof state !== 'object') state = defaultState();
+        state.settings = state.settings && typeof state.settings === 'object' ? state.settings : { activeView:'ideas', ideaFilter:'all', sectionFilter:'all' };
         const item = navItems.find(n => n.id === activeView) || navItems[0];
-        document.getElementById('pageTitle').textContent = item.name;
-        document.getElementById('pageKicker').textContent = item.kicker;
-        document.getElementById('topActions').innerHTML = topButtons();
-        renderNav();
+        const pageTitle = document.getElementById('pageTitle');
+        const pageKicker = document.getElementById('pageKicker');
+        const topActions = document.getElementById('topActions');
         const content = document.getElementById('content');
+        if (!pageTitle || !pageKicker || !topActions || !content) return;
+        pageTitle.textContent = item.name;
+        pageKicker.textContent = item.kicker;
+        topActions.innerHTML = topButtons();
+        renderNav();
         const renderers = { ideas:renderIdeas, drafts:renderDrafts, published:renderPublished, analytics:renderAnalytics, principles:renderPrinciples, settings:renderSettings };
-        content.innerHTML = renderers[activeView]();
+        const renderer = renderers[activeView] || renderIdeas;
+        content.innerHTML = renderer();
         document.title = `${item.name} · 火花台`;
       }
 
@@ -847,38 +872,40 @@
       }
 
       function renderIdeas() {
-        const filter = state.settings.ideaFilter || 'all';
-        const sectionFilter = state.sections.some(s=>s.id===state.settings.sectionFilter) ? state.settings.sectionFilter : 'all';
-        const filtered = state.ideas.filter(idea => (filter === 'all' || idea.status === filter) && (sectionFilter === 'all' || idea.sectionId === sectionFilter));
+        const ideas = stateItems('ideas');
+        const sections = stateItems('sections');
+        const filter = state?.settings?.ideaFilter || 'all';
+        const sectionFilter = sections.some(s=>s.id===state?.settings?.sectionFilter) ? state.settings.sectionFilter : 'all';
+        const filtered = ideas.filter(idea => (filter === 'all' || idea.status === filter) && (sectionFilter === 'all' || idea.sectionId === sectionFilter));
         const selectedSection = sectionFilter === 'all' ? null : getSection(sectionFilter);
-        const recommended = state.ideas.filter(i => ideaScore(i) >= 12).length;
-        const adopted = state.ideas.filter(i => i.status === 'adopted').length;
-        const auto = state.ideas.filter(i => i.sourceMode === 'auto').length;
+        const recommended = ideas.filter(i => ideaScore(i) >= 12).length;
+        const adopted = ideas.filter(i => i.status === 'adopted').length;
+        const auto = ideas.filter(i => i.sourceMode === 'auto').length;
         return `
           <section class="hero">
             <div><h2>把灵光一闪，变成<span class="hero-accent">可复盘的生产线</span></h2><p>热点负责敲门，判断力决定做不做。先用四维评分筛选，再让稿件和数据替你积累经验。</p></div>
-            <div class="hero-stats"><div class="hero-stat"><strong>${state.ideas.length}</strong><span>创意池</span></div><div class="hero-stat"><strong>${recommended}</strong><span>推荐做</span></div><div class="hero-stat"><strong>${adopted}</strong><span>已采用</span></div></div>
+            <div class="hero-stats"><div class="hero-stat"><strong>${ideas.length}</strong><span>创意池</span></div><div class="hero-stat"><strong>${recommended}</strong><span>推荐做</span></div><div class="hero-stat"><strong>${adopted}</strong><span>已采用</span></div></div>
           </section>
           <div class="stats">
-            ${statCard('总创意',state.ideas.length,'含自动与手动记录',icons.ideas)}
+            ${statCard('总创意',ideas.length,'含自动与手动记录',icons.ideas)}
             ${statCard('高分推荐',recommended,'总分达到12分',icons.spark)}
             ${statCard('自动采集',auto,'来自热点雷达',icons.analytics)}
-            ${statCard('转稿率',state.ideas.length ? Math.round(adopted/state.ideas.length*100)+'%' : '0%','采用创意占比',icons.drafts)}
+            ${statCard('转稿率',ideas.length ? Math.round(adopted/ideas.length*100)+'%' : '0%','采用创意占比',icons.drafts)}
           </div>
-          <div class="section-head"><div><h2>${selectedSection?`${esc(selectedSection.icon)} ${esc(selectedSection.name)}`:'创意池'}</h2><p>${selectedSection?'正在查看该板块的创意':'评分达到12分自动标记为绿色推荐'}</p></div><div class="filters">${selectedSection?'<button class="filter-btn" data-section-nav="all">查看全部板块</button>':''}${[['all','全部'],['pending','待评估'],['candidate','备选'],['adopted','采用'],['rejected','淘汰']].map(([id,name])=>`<button class="filter-btn ${filter===id?'active':''}" data-idea-filter="${id}">${name}${id==='all'?'':` · ${state.ideas.filter(i=>(sectionFilter==='all'||i.sectionId===sectionFilter)&&i.status===id).length}`}</button>`).join('')}</div></div>
+          <div class="section-head"><div><h2>${selectedSection?`${esc(selectedSection.icon)} ${esc(selectedSection.name)}`:'创意池'}</h2><p>${selectedSection?'正在查看该板块的创意':'评分达到12分自动标记为绿色推荐'}</p></div><div class="filters">${selectedSection?'<button class="filter-btn" data-section-nav="all">查看全部板块</button>':''}${[['all','全部'],['pending','待评估'],['candidate','备选'],['adopted','采用'],['rejected','淘汰']].map(([id,name])=>`<button class="filter-btn ${filter===id?'active':''}" data-idea-filter="${id}">${name}${id==='all'?'':` · ${ideas.filter(i=>(sectionFilter==='all'||i.sectionId===sectionFilter)&&i.status===id).length}`}</button>`).join('')}</div></div>
           <div class="card-grid">${filtered.length ? filtered.map(renderIdeaCard).join('') : emptyState('当前筛选下没有创意','换个状态看看，或添加一条新创意。')}</div>
         `;
       }
 
       function statCard(label,value,note,icon) {
-        return `<div class="stat-card"><div class="stat-top"><span>${label}</span><i class="stat-icon">${icon}</i></div><div class="stat-value">${value}</div><div class="stat-note">${note}</div></div>`;
+        return `<div class="stat-card"><div class="stat-top"><span>${esc(label||'—')}</span><i class="stat-icon">${icon||''}</i></div><div class="stat-value">${esc(value??'—')}</div><div class="stat-note">${esc(note||'')}</div></div>`;
       }
 
       function renderIdeaCard(idea) {
         const item = idea && typeof idea === 'object' ? idea : {};
         const score = ideaScore(item);
         const section = getSection(item.sectionId);
-        return `<article class="card idea-card ${score>=12?'recommended':''}" data-idea-card="${escAttr(item.id||'')}">
+        return `<article class="card idea-card ${score>=12?'recommended':''}" data-idea-card="${escAttr(item.id||'')}" tabindex="0" aria-label="编辑${escAttr(item.title||'创意')}">
           <div class="card-top"><div class="eyebrow"><i class="source-dot ${item.sourceMode==='manual'?'manual':''}"></i>${item.sourceMode==='auto'?'自动采集':'手动添加'} · ${esc(item.source||'手动记录')}<span class="badge" style="color:${escAttr(section?.color||'#6b7280')};background:${escAttr(section?.color||'#6b7280')}18;border-color:${escAttr(section?.color||'#6b7280')}35">${esc(section?.name||'未分板块')}</span></div>${statusBadge(item.status)}</div>
           <h3 class="idea-title">${esc(item.title||'未命名创意')}</h3><p class="idea-note">${esc(item.note || '暂无备注')}</p>
           <div class="score-row">${Object.entries(SCORE_LABELS).map(([key,label])=>`<div class="score-item"><strong>${Number(item.scores?.[key]||0)}</strong><span>${label}</span></div>`).join('')}</div>
@@ -891,40 +918,44 @@
       }
 
       function draftStatus(draft) {
-        return draft.checklist.every(Boolean)
+        return CHECKLIST_LABELS.every((_,index)=>Boolean(draft?.checklist?.[index]))
           ? { label:'待发布', className:'badge-green' }
           : { label:'编辑中', className:'badge-blue' };
       }
 
       function filteredDrafts() {
         const query = draftSearchQuery.trim().toLocaleLowerCase('zh-CN');
-        if (!query) return state.drafts;
-        return state.drafts.filter(draft => {
-          const section = getSection(draft.sectionId);
-          const sourceIdea = state.ideas.find(idea=>idea.id===draft.sourceIdeaId);
-          return `${draft.title||''} ${section.name} ${sourceIdea?.title||''}`.toLocaleLowerCase('zh-CN').includes(query);
+        const drafts = stateItems('drafts');
+        const ideas = stateItems('ideas');
+        if (!query) return drafts;
+        return drafts.filter(draft => {
+          const section = getSection(draft?.sectionId);
+          const sourceIdea = ideas.find(idea=>idea?.id===draft?.sourceIdeaId);
+          return `${draft?.title||''} ${section?.name||''} ${sourceIdea?.title||''}`.toLocaleLowerCase('zh-CN').includes(query);
         });
       }
 
       function renderDraftListItem(draft) {
-        const section = getSection(draft.sectionId);
-        const status = draftStatus(draft);
-        const cover = safeImageSrc(draft.coverImage);
-        return `<button class="draft-list-item ${draft.id===state.activeDraftId?'active':''}" type="button" data-action="select-draft" data-id="${escAttr(draft.id)}" aria-pressed="${draft.id===state.activeDraftId?'true':'false'}">
+        const item = draft && typeof draft === 'object' ? draft : {};
+        const section = getSection(item.sectionId);
+        const status = draftStatus(item);
+        const cover = safeImageSrc(item.coverImage);
+        return `<button class="draft-list-item ${item.id===state.activeDraftId?'active':''}" type="button" data-action="select-draft" data-id="${escAttr(item.id||'')}" aria-pressed="${item.id===state.activeDraftId?'true':'false'}">
           <span class="draft-list-thumb">${cover?`<img src="${escAttr(cover)}" alt="">`:'<span aria-hidden="true">▧</span>'}</span>
-          <span class="draft-list-copy"><span class="draft-list-title" id="draft-list-title-${escAttr(draft.id)}" title="${escAttr(draft.title||'未命名稿件')}">${esc(draft.title||'未命名稿件')}</span><span class="draft-list-meta"><span class="badge badge-gray" title="${escAttr(section.name)}">${esc(section.name)}</span><span class="badge ${status.className}" id="draft-list-status-${escAttr(draft.id)}">${status.label}</span></span></span>
+          <span class="draft-list-copy"><span class="draft-list-title" id="draft-list-title-${escAttr(item.id||'')}" title="${escAttr(item.title||'未命名稿件')}">${esc(item.title||'未命名稿件')}</span><span class="draft-list-meta"><span class="badge badge-gray" title="${escAttr(section?.name||'未分板块')}">${esc(section?.name||'未分板块')}</span><span class="badge ${status.className}" id="draft-list-status-${escAttr(item.id||'')}">${status.label}</span></span></span>
         </button>`;
       }
 
       function renderDraftSidebarItems() {
         const drafts = filteredDrafts();
         if (drafts.length) return drafts.map(renderDraftListItem).join('');
-        return `<div class="draft-list-empty">${state.drafts.length?'没有匹配的稿件':'暂无稿件'}</div>`;
+        return `<div class="draft-list-empty">${stateItems('drafts').length?'没有匹配的稿件':'暂无稿件'}</div>`;
       }
 
       function renderDrafts() {
-        if (!state.drafts.some(d=>d.id===state.activeDraftId)) state.activeDraftId=state.drafts[0]?.id||null;
-        const activeDraft = state.drafts.find(d=>d.id===state.activeDraftId);
+        const drafts = stateItems('drafts');
+        if (!drafts.some(d=>d?.id===state.activeDraftId)) state.activeDraftId=drafts[0]?.id||null;
+        const activeDraft = drafts.find(d=>d?.id===state.activeDraftId);
         return `
           <div class="draft-workspace">
             <aside class="card draft-sidebar" aria-label="备选稿件列表">
@@ -952,7 +983,8 @@
       }
 
       function renderAiResult(draft) {
-        const issues = aiCheck(draft.body);
+        const item = draft && typeof draft === 'object' ? draft : {};
+        const issues = aiCheck(item.body);
         return issues.length
           ? `<div class="ai-result warn"><div class="ai-result-head"><span>⚠</span>发现 ${issues.length} 处可疑AI味</div><ul>${issues.map(i=>`<li>${esc(i)}</li>`).join('')}</ul></div>`
           : `<div class="ai-result clean"><div class="ai-result-head"><span>✓</span>没闻到明显AI味</div><p>句式、语气和emoji数量都比较克制。</p></div>`;
@@ -967,12 +999,12 @@
         return String(dataUrl || '').length;
       }
 
-      function draftImageBytes(draft, coverImage=draft.coverImage, images=draft.images) {
+      function draftImageBytes(draft, coverImage=draft?.coverImage, images=draft?.images) {
         return imageDataBytes(coverImage) + (Array.isArray(images) ? images.reduce((sum,image)=>sum+imageDataBytes(image),0) : 0);
       }
 
       function storedImageBytes() {
-        return [...state.drafts,...state.published].reduce((sum,item)=>sum+draftImageBytes(item),0);
+        return [...stateItems('drafts'),...stateItems('published')].reduce((sum,item)=>sum+draftImageBytes(item),0);
       }
 
       function imageBytesAfterDraftChange(draft,coverImage,images) {
@@ -1041,64 +1073,69 @@
       }
 
       function previewTags(draft) {
-        const matched = `${draft.title || ''} ${draft.body || ''}`.match(/#[\p{L}\p{N}_-]+/gu) || [];
+        const item = draft && typeof draft === 'object' ? draft : {};
+        const matched = `${item.title || ''} ${item.body || ''}`.match(/#[\p{L}\p{N}_-]+/gu) || [];
         const tags = [...new Set(matched)].slice(0,5);
         if (tags.length) return tags;
-        const fallback = [`#${getSection(draft.sectionId).name}`];
-        if (draft.coverType && draft.coverType!=='其他') fallback.push(`#${draft.coverType}`);
+        const fallback = [`#${getSection(item.sectionId).name}`];
+        if (item.coverType && item.coverType!=='其他') fallback.push(`#${item.coverType}`);
         return fallback;
       }
 
       function renderDraftPreview(draft) {
-        const cover = safeImageSrc(draft.coverImage);
+        const item = draft && typeof draft === 'object' ? draft : {};
+        const cover = safeImageSrc(item.coverImage);
         return `<section class="publish-preview" aria-label="小红书发布预览">
           <div class="publish-preview-head"><strong>发布预览</strong><span>小红书效果</span></div>
-          <div class="xhs-preview">${cover?`<img class="xhs-preview-cover" src="${escAttr(cover)}" alt="${escAttr(draft.title||'稿件')}封面">`:''}<div class="xhs-preview-copy">
-            <h4 class="xhs-preview-title" id="preview-title-${draft.id}">${esc(draft.title||'标题会显示在这里')}</h4>
-            <p class="xhs-preview-body" id="preview-body-${draft.id}">${esc(draft.body||'正文前两行会显示在这里')}</p>
-            <div class="xhs-preview-tags" id="preview-tags-${draft.id}">${previewTags(draft).map(tag=>`<span>${esc(tag)}</span>`).join('')}</div>
+          <div class="xhs-preview">${cover?`<img class="xhs-preview-cover" src="${escAttr(cover)}" alt="${escAttr(item.title||'稿件')}封面">`:''}<div class="xhs-preview-copy">
+            <h4 class="xhs-preview-title" id="preview-title-${escAttr(item.id||'')}">${esc(item.title||'标题会显示在这里')}</h4>
+            <p class="xhs-preview-body" id="preview-body-${escAttr(item.id||'')}">${esc(item.body||'正文前两行会显示在这里')}</p>
+            <div class="xhs-preview-tags" id="preview-tags-${escAttr(item.id||'')}">${previewTags(item).map(tag=>`<span>${esc(tag)}</span>`).join('')}</div>
           </div></div>
         </section>`;
       }
 
       function renderDraftMedia(draft) {
-        const cover = safeImageSrc(draft.coverImage);
-        const images = Array.isArray(draft.images) ? draft.images.map(safeImageSrc).filter(Boolean) : [];
+        const item = draft && typeof draft === 'object' ? draft : {};
+        const cover = safeImageSrc(item.coverImage);
+        const images = Array.isArray(item.images) ? item.images.map(safeImageSrc).filter(Boolean) : [];
         return `<div class="media-editor">
           <div class="media-section"><div class="media-section-head"><label class="field-label">封面图</label><span class="media-help">支持点击或拖拽上传</span></div>
-            <div class="cover-upload ${cover?'has-image':''}" data-action="select-cover-image" data-id="${draft.id}" data-cover-dropzone="${draft.id}" role="button" tabindex="0" aria-label="${cover?'更换封面图':'点击添加封面'}">
-              ${cover?`<img src="${escAttr(cover)}" alt="封面图预览"><button class="image-remove" type="button" data-action="remove-cover-image" data-id="${draft.id}" title="删除封面图" aria-label="删除封面图">×</button>`:`<span class="cover-placeholder"><span class="camera">📷</span><strong>点击添加封面</strong></span>`}
+            <div class="cover-upload ${cover?'has-image':''}" data-action="select-cover-image" data-id="${escAttr(item.id||'')}" data-cover-dropzone="${escAttr(item.id||'')}" role="button" tabindex="0" aria-label="${cover?'更换封面图':'点击添加封面'}">
+              ${cover?`<img src="${escAttr(cover)}" alt="封面图预览"><button class="image-remove" type="button" data-action="remove-cover-image" data-id="${escAttr(item.id||'')}" title="删除封面图" aria-label="删除封面图">×</button>`:`<span class="cover-placeholder"><span class="camera">📷</span><strong>点击添加封面</strong></span>`}
             </div>
-            <input class="hidden" type="file" accept="image/*" data-cover-image-input data-id="${draft.id}">
+            <input class="hidden" type="file" accept="image/*" data-cover-image-input data-id="${escAttr(item.id||'')}">
           </div>
           <div class="media-section"><div class="media-section-head"><label class="field-label">正文配图</label><span class="media-help">1–9 张 · 本机图片共不超过 3MB</span></div>
-            ${images.length?`<div class="inline-images">${images.map((image,index)=>`<div class="inline-image"><img src="${escAttr(image)}" alt="正文配图 ${index+1}"><button class="image-remove" type="button" data-action="remove-body-image" data-id="${draft.id}" data-index="${index}" title="删除配图" aria-label="删除第 ${index+1} 张配图">×</button></div>`).join('')}</div>`:''}
-            <input class="hidden" type="file" accept="image/*" multiple data-body-images-input data-id="${draft.id}">
-            <button class="btn btn-sm add-images-btn" type="button" data-action="select-body-images" data-id="${draft.id}" ${images.length>=MAX_BODY_IMAGES?'disabled':''}>${icons.plus}添加配图</button><span class="image-limit">${images.length} / ${MAX_BODY_IMAGES}</span>
+            ${images.length?`<div class="inline-images">${images.map((image,index)=>`<div class="inline-image"><img src="${escAttr(image)}" alt="正文配图 ${index+1}"><button class="image-remove" type="button" data-action="remove-body-image" data-id="${escAttr(item.id||'')}" data-index="${index}" title="删除配图" aria-label="删除第 ${index+1} 张配图">×</button></div>`).join('')}</div>`:''}
+            <input class="hidden" type="file" accept="image/*" multiple data-body-images-input data-id="${escAttr(item.id||'')}">
+            <button class="btn btn-sm add-images-btn" type="button" data-action="select-body-images" data-id="${escAttr(item.id||'')}" ${images.length>=MAX_BODY_IMAGES?'disabled':''}>${icons.plus}添加配图</button><span class="image-limit">${images.length} / ${MAX_BODY_IMAGES}</span>
           </div>
         </div>`;
       }
 
       function renderDraftCard(draft) {
-        const count = countChars(draft.body);
-        const checked = draft.checklist.filter(Boolean).length;
-        return `<article class="card draft-card" data-draft-card="${draft.id}">
+        const item = draft && typeof draft === 'object' ? draft : {};
+        const checklist = CHECKLIST_LABELS.map((_,index)=>Boolean(item.checklist?.[index]));
+        const count = countChars(item.body||'');
+        const checked = checklist.filter(Boolean).length;
+        return `<article class="card draft-card" data-draft-card="${escAttr(item.id||'')}">
           <div class="editor-pane">
-            <div class="editor-head"><div class="eyebrow">自动保存 · 更新于 ${formatDate(draft.updatedAt,true)}</div><button class="btn btn-sm btn-ghost" data-action="delete-draft" data-id="${draft.id}">${icons.trash}删除</button></div>
-            <input class="draft-title-input" data-draft-field="title" data-id="${draft.id}" value="${escAttr(draft.title)}" aria-label="稿件标题">
-            <div class="editor-meta"><label class="field-label">正文</label><span class="word-count ${count>200?'over':''}" id="word-${draft.id}">${count} / 200 字</span></div>
-            <textarea class="body-editor" data-draft-field="body" data-id="${draft.id}" placeholder="从一句真实的话开始……">${esc(draft.body)}</textarea>
+            <div class="editor-head"><div class="eyebrow">自动保存 · 更新于 ${formatDate(item.updatedAt,true)}</div><button class="btn btn-sm btn-ghost" data-action="delete-draft" data-id="${escAttr(item.id||'')}">${icons.trash}删除</button></div>
+            <input class="draft-title-input" data-draft-field="title" data-id="${escAttr(item.id||'')}" value="${escAttr(item.title||'')}" aria-label="稿件标题">
+            <div class="editor-meta"><label class="field-label">正文</label><span class="word-count ${count>200?'over':''}" id="word-${escAttr(item.id||'')}">${count} / 200 字</span></div>
+            <textarea class="body-editor" data-draft-field="body" data-id="${escAttr(item.id||'')}" placeholder="从一句真实的话开始……">${esc(item.body||'')}</textarea>
             <div class="editor-meta"><label class="field-label">封面构想</label><span class="word-count">先有画面，再放文字</span></div>
-            <div class="cover-row"><input class="input" data-draft-field="coverIdea" data-id="${draft.id}" value="${escAttr(draft.coverIdea)}" placeholder="例如：停车场里拿红笔圈出一辆车"><select class="select" data-draft-field="coverType" data-id="${draft.id}">${coverOptions(draft.coverType)}</select></div>
-            ${renderDraftMedia(draft)}
-            ${renderDraftPreview(draft)}
+            <div class="cover-row"><input class="input" data-draft-field="coverIdea" data-id="${escAttr(item.id||'')}" value="${escAttr(item.coverIdea||'')}" placeholder="例如：停车场里拿红笔圈出一辆车"><select class="select" data-draft-field="coverType" data-id="${escAttr(item.id||'')}">${coverOptions(item.coverType||'其他')}</select></div>
+            ${renderDraftMedia(item)}
+            ${renderDraftPreview(item)}
           </div>
           <aside class="review-pane">
-            <h3 class="review-title"><span>AI味检查</span><span class="badge badge-purple">规则检测</span></h3><div id="ai-${draft.id}">${renderAiResult(draft)}</div>
-            <h3 class="review-title"><span>发布前 checklist</span><span class="word-count" id="check-count-${draft.id}">${checked}/6</span></h3>
-            <div class="checklist">${CHECKLIST_LABELS.map((label,i)=>`<label class="check-item"><input type="checkbox" data-check-index="${i}" data-id="${draft.id}" ${draft.checklist[i]?'checked':''}><span>${label}</span></label>`).join('')}</div>
-            <div class="progress"><div class="progress-bar" id="progress-${draft.id}" style="width:${checked/6*100}%"></div></div>
-            <div class="review-actions"><button class="btn btn-primary" data-action="publish-draft" data-id="${draft.id}">${icons.published}发布并归档</button><button class="btn icon-btn" data-action="duplicate-draft" data-id="${draft.id}" title="复制稿件">⎘</button></div>
+            <h3 class="review-title"><span>AI味检查</span><span class="badge badge-purple">规则检测</span></h3><div id="ai-${escAttr(item.id||'')}">${renderAiResult(item)}</div>
+            <h3 class="review-title"><span>发布前 checklist</span><span class="word-count" id="check-count-${escAttr(item.id||'')}">${checked}/6</span></h3>
+            <div class="checklist">${CHECKLIST_LABELS.map((label,i)=>`<label class="check-item"><input type="checkbox" data-check-index="${i}" data-id="${escAttr(item.id||'')}" ${checklist[i]?'checked':''}><span>${label}</span></label>`).join('')}</div>
+            <div class="progress"><div class="progress-bar" id="progress-${escAttr(item.id||'')}" style="width:${checked/6*100}%"></div></div>
+            <div class="review-actions"><button class="btn btn-primary" data-action="publish-draft" data-id="${escAttr(item.id||'')}">${icons.published}发布并归档</button><button class="btn icon-btn" data-action="duplicate-draft" data-id="${escAttr(item.id||'')}" title="复制稿件">⎘</button></div>
           </aside>
         </article>`;
       }
@@ -1108,7 +1145,7 @@
       }
 
       function renderPublished() {
-        const published = Array.isArray(state.published) ? state.published : [];
+        const published = stateItems('published');
         const totalViews = published.reduce((sum,p)=>sum+Number(latestMetrics(p).views||0),0);
         const totalLikes = published.reduce((sum,p)=>sum+Number(latestMetrics(p).likes||0),0);
         const hits = published.filter(p=>p?.mark==='hit').length;
@@ -1118,7 +1155,7 @@
             ${statCard('累计发布',published.length,'全部发布记录',icons.published)}
             ${statCard('累计浏览',formatNum(totalViews),'按最新阶段数据',icons.analytics)}
             ${statCard('累计点赞',formatNum(totalLikes),'按最新阶段数据',icons.spark)}
-            ${statCard('平均互动率',avgEng.toFixed(1)+'%','赞藏评 / 浏览',icons.principles)}
+            ${statCard('平均互动率',avgEng.toFixed(1)+'%','赞藏评享 / 浏览',icons.principles)}
           </div>
           <div class="section-head"><div><h2>发布记录</h2><p>点击卡片查看全文与复盘；切换24h、7d、30d可直接录入反馈。</p></div><div class="filters"><span class="badge badge-green">爆款 ${hits}</span><span class="badge badge-red">扑街 ${published.filter(p=>p?.mark==='flop').length}</span></div></div>
           <div class="published-grid">${published.length ? published.map(renderPublishedCard).join('') : emptyState('还没有发布记录','稿件完成检查后，点击“发布并归档”。')}</div>
@@ -1141,7 +1178,7 @@
       }
 
       function showPublishedDetail(id) {
-        const pub = state.published.find(item=>item?.id===id);
+        const pub = stateItems('published').find(item=>item?.id===id);
         if (!pub) { toast('未找到这篇已发稿件','可能已被删除或数据已更新','warn'); return; }
         const section = getSection(pub.sectionId);
         const cover = safeImageSrc(pub.coverImage);
@@ -1153,7 +1190,7 @@
           <div class="modal-body">
             <div class="published-detail-layout">
               <div class="published-detail-cover">${cover?`<img src="${escAttr(cover)}" alt="${escAttr(pub.title||'稿件')}封面">`:`<div class="published-detail-cover-placeholder"><span style="font-size:30px" aria-hidden="true">▧</span><strong>暂无封面图</strong><span>发布记录未保存封面</span></div>`}</div>
-              <div><div class="published-detail-meta"><span class="badge" style="color:${escAttr(section?.color||'#6b7280')};background:${escAttr(section?.color||'#6b7280')}18;border-color:${escAttr(section?.color||'#6b7280')}35">${esc(section?.icon||'📁')} ${esc(section?.name||'未分板块')}</span><span class="badge badge-blue">${esc(pub.platform||'小红书')}</span><span class="badge ${pub.mark==='hit'?'badge-green':pub.mark==='flop'?'badge-red':'badge-gray'}">${rating}</span></div><h3 class="published-detail-title">${esc(pub.title||'未命名稿件')}</h3><div class="word-count">发布于 ${formatDate(pub.publishedAt,true)}</div><div class="published-detail-tags" style="margin-top:12px">${tags.map(tag=>`<span class="badge badge-blue">${esc(tag)}</span>`).join('')}</div></div>
+              <div><div class="published-detail-meta"><span class="badge" style="color:${escAttr(section?.color||'#6b7280')};background:${escAttr(section?.color||'#6b7280')}18;border-color:${escAttr(section?.color||'#6b7280')}35">${esc(section?.icon||'📁')} ${esc(section?.name||'未分板块')}</span><span class="badge badge-blue">${esc(pub.platform||'小红书')}</span><span class="badge ${pub.mark==='hit'?'badge-green':pub.mark==='flop'?'badge-red':'badge-gray'}">评级：${rating}</span></div><h3 class="published-detail-title">${esc(pub.title||'未命名稿件')}</h3><div class="word-count">发布日期：${formatFullDate(pub.publishedAt)}</div><div class="published-detail-tags" style="margin-top:12px">${tags.map(tag=>`<span class="badge badge-blue">${esc(tag)}</span>`).join('')}</div></div>
             </div>
             <section class="published-detail-section"><h4>正文全文</h4><p class="published-detail-body">${esc(pub.body||'暂无正文')}</p></section>
             <section class="published-detail-section"><h4>互动数据</h4><div class="published-stage-list">${STAGES.map(stage=>{const metrics={...blankMetrics(),...(pub.metrics?.[stage]||{})};return `<div class="published-stage-row"><span class="published-stage-name">${stage}</span>${metricLabels.map(([key,label])=>`<div class="published-stage-metric"><span>${label}</span><strong>${formatNum(metrics?.[key]||0)}</strong></div>`).join('')}</div>`;}).join('')}</div></section>
@@ -1164,7 +1201,8 @@
       }
 
       function renderAnalytics() {
-        const data = state.published.map(p => ({ p, m:latestMetrics(p) }));
+        const published = stateItems('published');
+        const data = published.map(p => ({ p, m:latestMetrics(p) }));
         const maxViews = Math.max(1,...data.map(x=>Number(x.m.views||0)));
         const avgTitle = data.length ? data.reduce((s,x)=>s+countChars(x.p.title),0)/data.length : 0;
         const hookCount = data.filter(x=>/(别|先|为什么|怎么|到底|真相|答案|避坑)/.test(x.p.title)).length;
@@ -1177,7 +1215,7 @@
             ${statCard('分析样本',data.length,'已发布内容数量',icons.analytics)}
             ${statCard('标题均长',avgTitle.toFixed(1)+'字','建议短而有方向',icons.edit)}
             ${statCard('钩子标题',hookCount,'含别/先/为什么等',icons.spark)}
-            ${statCard('爆款率',data.length?Math.round(state.published.filter(p=>p.mark==='hit').length/data.length*100)+'%':'0%','手动标记口径',icons.published)}
+            ${statCard('爆款率',data.length?Math.round(published.filter(p=>p.mark==='hit').length/data.length*100)+'%':'0%','手动标记口径',icons.published)}
           </div>
           <div class="analytics-grid">
             <section class="card analytics-card"><h3>标题规律</h3><p>从标题长度、方向性钩子和数字使用中找规律</p><div class="insight-list">
@@ -1190,7 +1228,7 @@
             <section class="card analytics-card"><h3>发布时机</h3><p>按发布时间段聚合，不把偶然当规律</p><div class="insight-list">${timeGroups.length ? timeGroups.map(g=>`<div class="insight"><i class="insight-icon">时</i><div><strong>${esc(g.name)} · 平均 ${formatNum(g.avgViews)} 浏览</strong><p>${g.count} 篇样本，平均互动率 ${g.avgEng.toFixed(1)}%</p></div></div>`).join('') : '<p class="word-count">暂无发布时间样本。</p>'}</div></section>
           </div>
           <section class="card analytics-card" style="margin-bottom:15px"><h3>AI复盘建议</h3><p>基于当前本地样本的规则推断；样本越多，建议越有参考价值。</p><div class="insight-list">${suggestions.map((s,i)=>`<div class="insight"><i class="insight-icon">${i+1}</i><div><strong>${esc(s.title)}</strong><p>${esc(s.detail)}</p></div></div>`).join('')}</div></section>
-          <section class="card table-card"><div class="table-head"><h3>内容效果对比表</h3><p>浏览取最新已录入阶段，互动率=（赞+藏+评）/浏览</p></div><div class="table-wrap"><table><thead><tr><th>标题</th><th>板块</th><th>阶段</th><th>浏览</th><th>赞</th><th>藏</th><th>评</th><th>互动率</th><th>标记</th></tr></thead><tbody>${data.length ? data.map(({p,m})=>`<tr><td>${esc(p.title)}</td><td>${esc(getSection(p.sectionId).name)}</td><td>${m.stage}</td><td>${formatNum(m.views)}</td><td>${formatNum(m.likes)}</td><td>${formatNum(m.saves)}</td><td>${formatNum(m.comments)}</td><td>${engagement(m).toFixed(1)}%</td><td>${markBadge(p.mark)}</td></tr>`).join('') : '<tr><td colspan="9" style="text-align:center;color:var(--muted)">暂无数据</td></tr>'}</tbody></table></div></section>
+          <section class="card table-card"><div class="table-head"><h3>内容效果对比表</h3><p>浏览取最新已录入阶段，互动率=（赞+藏+评+分享）/浏览</p></div><div class="table-wrap"><table><thead><tr><th>标题</th><th>板块</th><th>阶段</th><th>浏览</th><th>赞</th><th>藏</th><th>评</th><th>分享</th><th>互动率</th><th>标记</th></tr></thead><tbody>${data.length ? data.map(({p,m})=>`<tr><td>${esc(p.title)}</td><td>${esc(getSection(p.sectionId).name)}</td><td>${m.stage}</td><td>${formatNum(m.views)}</td><td>${formatNum(m.likes)}</td><td>${formatNum(m.saves)}</td><td>${formatNum(m.comments)}</td><td>${formatNum(m.shares)}</td><td>${engagement(m).toFixed(1)}%</td><td>${markBadge(p.mark)}</td></tr>`).join('') : '<tr><td colspan="10" style="text-align:center;color:var(--muted)">暂无数据</td></tr>'}</tbody></table></div></section>
         `;
       }
 
@@ -1204,12 +1242,16 @@
       }
 
       function groupStats(data, keyFn) {
+        if (!Array.isArray(data) || typeof keyFn !== 'function') return [];
         const groups = {};
         data.forEach(item => { const key=keyFn(item); (groups[key] ||= []).push(item); });
         return Object.entries(groups).map(([name,items]) => ({ name, count:items.length, avgViews:Math.round(items.reduce((s,x)=>s+Number(x.m.views||0),0)/items.length), avgEng:items.reduce((s,x)=>s+engagement(x.m),0)/items.length })).sort((a,b)=>b.avgViews-a.avgViews);
       }
 
       function buildSuggestions(data, hookCount, numericCount, covers, times) {
+        data = Array.isArray(data) ? data : [];
+        covers = Array.isArray(covers) ? covers : [];
+        times = Array.isArray(times) ? times : [];
         if (!data.length) return [{title:'先积累最小样本',detail:'发布3篇内容并补齐24h数据后，再比较标题、封面与发布时间。'}];
         const list = [];
         const top = [...data].sort((a,b)=>b.m.views-a.m.views)[0];
@@ -1223,21 +1265,27 @@
       }
 
       function renderPrinciples() {
-        const enabled = state.principles.filter(p=>p.enabled).length;
+        const principles = stateItems('principles');
+        const enabled = principles.filter(p=>p.enabled).length;
+        const progress = principles.length ? enabled/principles.length*100 : 0;
         return `
-          <section class="hero" style="grid-template-columns:1fr minmax(250px,.55fr)"><div><h2>原则不是墙上的字，<span class="hero-accent">是发布前的刹车</span></h2><p>点击文字即可改，开关用于临时停用。所有修改都会自动保存在当前浏览器。</p></div><div class="principle-progress"><div class="progress"><div class="progress-bar" style="width:${enabled/state.principles.length*100}%"></div></div><strong>${enabled}/${state.principles.length} 启用</strong></div></section>
+          <section class="hero" style="grid-template-columns:1fr minmax(250px,.55fr)"><div><h2>原则不是墙上的字，<span class="hero-accent">是发布前的刹车</span></h2><p>点击文字即可改，开关用于临时停用。所有修改都会自动保存在当前浏览器。</p></div><div class="principle-progress"><div class="progress"><div class="progress-bar" style="width:${progress}%"></div></div><strong>${enabled}/${principles.length} 启用</strong></div></section>
           <div class="section-head"><div><h2>运营原则清单</h2><p>默认20条，可编辑、可停用。</p></div></div>
-          <div class="principles">${state.principles.map((p,i)=>`<div class="principle-item"><div class="principle-num">${String(i+1).padStart(2,'0')}</div><input class="principle-input" data-principle-text data-id="${p.id}" value="${escAttr(p.text)}"><input class="principle-toggle" type="checkbox" data-principle-toggle data-id="${p.id}" ${p.enabled?'checked':''} title="启用/停用"></div>`).join('')}</div>
+          <div class="principles">${principles.length?principles.map((p,i)=>`<div class="principle-item"><div class="principle-num">${String(i+1).padStart(2,'0')}</div><input class="principle-input" data-principle-text data-id="${escAttr(p.id||'')}" value="${escAttr(p.text||'')}"><input class="principle-toggle" type="checkbox" data-principle-toggle data-id="${escAttr(p.id||'')}" ${p.enabled?'checked':''} title="启用/停用"></div>`).join(''):emptyState('暂无运营原则','可点击右上角恢复默认20条。')}</div>
         `;
       }
 
       function renderSettings() {
+        const sections = stateItems('sections');
+        const ideas = stateItems('ideas');
+        const drafts = stateItems('drafts');
+        const published = stateItems('published');
         const storageSize = new Blob([JSON.stringify(state)]).size;
         return `
           <div class="settings-grid">
             <section class="card settings-card">
               <h3>板块管理</h3><p>可修改图标、名称、颜色和目标占比；删除板块时，关联内容会安全迁移到其他板块。</p>
-              <div class="section-list">${state.sections.map(s=>`<div class="section-row">
+              <div class="section-list">${sections.map(s=>`<div class="section-row">
                 <input class="input section-emoji-input" value="${escAttr(s.icon)}" maxlength="8" data-section-field="icon" data-id="${escAttr(s.id)}" aria-label="${escAttr(s.name)}图标" title="板块 emoji">
                 <input class="color-input" type="color" value="${escAttr(s.color)}" data-section-field="color" data-id="${escAttr(s.id)}" title="板块颜色">
                 <input class="input" value="${escAttr(s.name)}" data-section-field="name" data-id="${escAttr(s.id)}" aria-label="板块名称">
@@ -1246,7 +1294,7 @@
               </div>`).join('')}</div>
               <button class="btn" style="margin-top:11px" data-action="add-section">${icons.plus}添加板块</button>
             </section>
-            <section class="card settings-card"><h3>数据管理</h3><p>共 ${state.ideas.length+state.drafts.length+state.published.length} 条内容记录，本地数据约 ${(storageSize/1024).toFixed(1)} KB。</p><div class="settings-actions"><button class="btn settings-action" data-action="export-json">${icons.download}<span><strong>导出完整备份</strong><br><span class="word-count">JSON格式，包含全部数据</span></span></button><button class="btn settings-action" data-action="import-json">${icons.upload}<span><strong>导入备份</strong><br><span class="word-count">导入前会检查数据结构</span></span></button><button class="btn settings-action" data-action="load-demo">${icons.spark}<span><strong>重新载入示例数据</strong><br><span class="word-count">2条创意、1篇备选、1篇已发</span></span></button></div><div class="danger-zone"><h4>危险操作</h4><button class="btn btn-danger" data-action="clear-data">${icons.trash}清空全部数据</button></div></section>
+            <section class="card settings-card"><h3>数据管理</h3><p>共 ${ideas.length+drafts.length+published.length} 条内容记录，本地数据约 ${(storageSize/1024).toFixed(1)} KB。</p><div class="settings-actions"><button class="btn settings-action" data-action="export-json">${icons.download}<span><strong>导出完整备份</strong><br><span class="word-count">JSON格式，包含全部数据</span></span></button><button class="btn settings-action" data-action="import-json">${icons.upload}<span><strong>导入备份</strong><br><span class="word-count">导入前会检查数据结构</span></span></button><button class="btn settings-action" data-action="load-demo">${icons.spark}<span><strong>重新载入示例数据</strong><br><span class="word-count">2条创意、1篇备选、1篇已发</span></span></button></div><div class="danger-zone"><h4>危险操作</h4><button class="btn btn-danger" data-action="clear-data">${icons.trash}清空全部数据</button></div></section>
             <section class="card settings-card" style="grid-column:1/-1"><h3>4S店板块扩展接口</h3><p>已预留模块注册、数据读取、创意写入和数据变更订阅接口；未来脚本可直接挂载业务面板。</p><div class="api-box"><span class="code-key">window</span>.ContentPlatformAPI = {<br>&nbsp;&nbsp;version: '${APP_VERSION}',<br>&nbsp;&nbsp;<span class="code-fn">getState</span>(),<br>&nbsp;&nbsp;<span class="code-fn">upsertIdea</span>(idea),<br>&nbsp;&nbsp;<span class="code-fn">registerModule</span>(name, renderFn),<br>&nbsp;&nbsp;<span class="code-fn">subscribe</span>(callback)<br>}</div><div class="extension-slot" id="fourS-extension"><strong>4S 店运营面板 · 待接入</strong><span>接口就绪，不影响当前创意工作流</span></div></section>
           </div>
         `;
@@ -1370,8 +1418,8 @@
         downloadBlob(blob,`火花台备份_${new Date().toISOString().slice(0,10)}.json`); toast('完整数据已导出');
       }
       function exportCSV() {
-        const rows = [['标题','板块','发布于','阶段','浏览','点赞','收藏','评论','互动率','标记','封面类型']];
-        state.published.forEach(p=>{const m=latestMetrics(p);rows.push([p.title,getSection(p.sectionId).name,p.publishedAt,m.stage,m.views,m.likes,m.saves,m.comments,engagement(m).toFixed(2)+'%',p.mark,p.coverType]);});
+        const rows = [['标题','板块','发布于','阶段','浏览','点赞','收藏','评论','分享','互动率','标记','封面类型']];
+        state.published.forEach(p=>{const m=latestMetrics(p);rows.push([p?.title,getSection(p?.sectionId)?.name,p?.publishedAt,m.stage,m.views,m.likes,m.saves,m.comments,m.shares,engagement(m).toFixed(2)+'%',p?.mark,p?.coverType]);});
         const csv='\uFEFF'+rows.map(row=>row.map(cell=>`"${String(cell??'').replace(/"/g,'""')}"`).join(',')).join('\n');
         downloadBlob(new Blob([csv],{type:'text/csv;charset=utf-8'}),`内容复盘_${new Date().toISOString().slice(0,10)}.csv`); toast('复盘表已导出');
       }
@@ -1483,7 +1531,7 @@
           closeModal(false);if(item.status==='adopted')adoptIdea(item.id);else{saveState(true);render();toast(editId?'创意已更新':'创意已加入池中',ideaScore(item)>=12?'达到12分，推荐制作':'可以继续评估');}
         }
         if (event.target.id==='draftForm') {
-          const fd=new FormData(event.target);state.drafts.unshift({id:makeId('draft'),ideaId:null,sectionId:String(fd.get('sectionId')),title:String(fd.get('title')).trim(),body:String(fd.get('body')||''),coverIdea:'',coverType:String(fd.get('coverType')),coverImage:'',images:[],checklist:Array(6).fill(false),createdAt:nowISO(),updatedAt:nowISO()});closeModal(false);saveState(true);render();toast('空白稿件已创建');
+          const fd=new FormData(event.target);const sectionId=String(fd.get('sectionId')||'');if(!state.sections.some(section=>section?.id===sectionId)){toast('请选择有效板块','','warn');return;}const draft={id:makeId('draft'),sourceIdeaId:null,sectionId,title:String(fd.get('title')).trim(),body:String(fd.get('body')||''),coverIdea:'',coverType:String(fd.get('coverType')),coverImage:'',images:[],checklist:Array(6).fill(false),createdAt:nowISO(),updatedAt:nowISO()};state.drafts.unshift(draft);state.activeDraftId=draft.id;closeModal(false);saveState(true);render();toast('空白稿件已创建');
         }
         if (event.target.id==='sectionForm') {
           const fd=new FormData(event.target);const name=String(fd.get('name')||'').trim();const icon=String(fd.get('icon')||'').trim();
@@ -1497,7 +1545,7 @@
       document.addEventListener('dragover',event=>{const zone=event.target.closest('[data-cover-dropzone]');if(!zone)return;event.preventDefault();zone.classList.add('dragging');});
       document.addEventListener('dragleave',event=>{const zone=event.target.closest('[data-cover-dropzone]');if(zone&&!zone.contains(event.relatedTarget))zone.classList.remove('dragging');});
       document.addEventListener('drop',event=>{const zone=event.target.closest('[data-cover-dropzone]');if(!zone)return;event.preventDefault();zone.classList.remove('dragging');const file=event.dataTransfer.files[0];if(file)setDraftCoverImage(zone.dataset.coverDropzone,file);});
-      document.addEventListener('keydown',event=>{const coverUpload=event.target.closest('[data-cover-dropzone]');if(coverUpload&&event.target===coverUpload&&(event.key==='Enter'||event.key===' ')){event.preventDefault();coverUpload.click();return;}if(event.key==='Escape')closeModal();if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();showIdeaModal();}});
+      document.addEventListener('keydown',event=>{const coverUpload=event.target.closest('[data-cover-dropzone]');if(coverUpload&&event.target===coverUpload&&(event.key==='Enter'||event.key===' ')){event.preventDefault();coverUpload.click();return;}const ideaCard=event.target.matches?.('[data-idea-card]')?event.target:null;if(ideaCard&&(event.key==='Enter'||event.key===' ')){event.preventDefault();showIdeaModal(ideaCard.dataset.ideaCard);return;}const publishedCard=event.target.matches?.('[data-published-card]')?event.target:null;if(publishedCard&&(event.key==='Enter'||event.key===' ')){event.preventDefault();showPublishedDetail(publishedCard.dataset.publishedCard);return;}if(event.key==='Escape')closeModal();if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();showIdeaModal();}});
 
       window.ContentPlatformAPI = Object.freeze({
         version: APP_VERSION,
