@@ -10,16 +10,101 @@ const store = require('./db');
 const ai = require('./ai');
 const collector = require('./collector');
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 8000);
 const ROOT_DIR = __dirname;
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 const EXPORTS_DIR = path.join(ROOT_DIR, 'exports');
 const ASSETS_DIR = path.join(ROOT_DIR, 'assets');
+const DATA_DIR = path.join(ROOT_DIR, 'data');
+const COLLECT_CONFIG_PATH = path.join(DATA_DIR, 'collect_config.json');
 const DOWNLOADS_DIR = path.join(os.homedir(), 'Downloads');
 const IMAGE_GENERATION_TIMEOUT_MS = 180000;
+const DEFAULT_COLLECT_CONFIG = Object.freeze({ enabled: true, intervalHours: 2 });
+const MAX_COLLECT_INTERVAL_HOURS = Math.floor(2_147_483_647 / (60 * 60 * 1000));
 
 fs.mkdirSync(PUBLIC_DIR, { recursive: true });
 fs.mkdirSync(EXPORTS_DIR, { recursive: true });
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+function normalizeCollectConfig(value) {
+  const config = value && typeof value === 'object' ? value : {};
+  const intervalHours = Number(config.intervalHours);
+  return {
+    enabled: typeof config.enabled === 'boolean' ? config.enabled : DEFAULT_COLLECT_CONFIG.enabled,
+    intervalHours: Number.isFinite(intervalHours) && intervalHours > 0 && intervalHours <= MAX_COLLECT_INTERVAL_HOURS
+      ? intervalHours
+      : DEFAULT_COLLECT_CONFIG.intervalHours
+  };
+}
+
+function readCollectConfig() {
+  try {
+    return normalizeCollectConfig(JSON.parse(fs.readFileSync(COLLECT_CONFIG_PATH, 'utf8')));
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.warn('读取自动采集配置失败，将使用默认配置：', error.message || error);
+    return { ...DEFAULT_COLLECT_CONFIG };
+  }
+}
+
+let collectConfig = readCollectConfig();
+let collectTimer = null;
+let collectSchedulerStarted = false;
+
+function runScheduledCollection() {
+  collector.collect()
+    .then(result => console.log(`热点自动采集完成：抓取 ${result.total} 条，新增 ${result.added} 条，跳过 ${result.skipped} 条`))
+    .catch(error => console.error('热点自动采集失败：', error.message || error));
+}
+
+function restartCollectTimer() {
+  if (collectTimer) {
+    clearInterval(collectTimer);
+    collectTimer = null;
+  }
+  if (!collectSchedulerStarted || !collectConfig.enabled) {
+    if (collectSchedulerStarted) console.log('热点自动采集已关闭');
+    return;
+  }
+  collectTimer = setInterval(runScheduledCollection, collectConfig.intervalHours * 60 * 60 * 1000);
+  collectTimer.unref();
+  console.log(`热点自动采集已启用，每 ${collectConfig.intervalHours} 小时运行一次`);
+}
+
+async function updateCollectConfig(patch) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    const error = new Error('采集配置格式无效');
+    error.status = 400;
+    throw error;
+  }
+  const hasEnabled = Object.prototype.hasOwnProperty.call(patch, 'enabled');
+  const hasInterval = Object.prototype.hasOwnProperty.call(patch, 'intervalHours');
+  if (!hasEnabled && !hasInterval) {
+    const error = new Error('请提供 enabled 或 intervalHours');
+    error.status = 400;
+    throw error;
+  }
+  if (hasEnabled && typeof patch.enabled !== 'boolean') {
+    const error = new Error('enabled 必须是布尔值');
+    error.status = 400;
+    throw error;
+  }
+  const intervalHours = hasInterval ? Number(patch.intervalHours) : collectConfig.intervalHours;
+  if (!Number.isFinite(intervalHours) || intervalHours <= 0 || intervalHours > MAX_COLLECT_INTERVAL_HOURS) {
+    const error = new Error(`intervalHours 必须是大于 0 且不超过 ${MAX_COLLECT_INTERVAL_HOURS} 的有效数字`);
+    error.status = 400;
+    throw error;
+  }
+  const nextConfig = {
+    enabled: hasEnabled ? patch.enabled : collectConfig.enabled,
+    intervalHours
+  };
+  const temporaryPath = `${COLLECT_CONFIG_PATH}.${process.pid}.${Date.now()}.tmp`;
+  await fs.promises.writeFile(temporaryPath, `${JSON.stringify(nextConfig, null, 2)}\n`, 'utf8');
+  await fs.promises.rename(temporaryPath, COLLECT_CONFIG_PATH);
+  collectConfig = nextConfig;
+  restartCollectTimer();
+  return { ...collectConfig };
+}
 
 const app = express();
 app.disable('x-powered-by');
@@ -65,6 +150,8 @@ app.delete('/api/ideas/:id', (req, res) => {
 
 app.post('/api/collect', asyncRoute(async (req, res) => success(res, await collector.collect())));
 app.get('/api/collect/status', asyncRoute(async (req, res) => success(res, await collector.readStatus())));
+app.get('/api/collect/config', (req, res) => success(res, { ...collectConfig }));
+app.post('/api/collect/config', asyncRoute(async (req, res) => success(res, await updateCollectConfig(req.body))));
 
 app.get('/api/drafts', (req, res) => success(res, store.getDrafts()));
 app.post('/api/drafts', (req, res) => success(res, store.createDraft(req.body), 201));
@@ -284,16 +371,8 @@ if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`火花台运行中 → http://localhost:${PORT}`);
   });
-
-  const configuredHours = Number(process.env.COLLECT_INTERVAL_HOURS || 2);
-  const intervalHours = Number.isFinite(configuredHours) && configuredHours > 0 ? configuredHours : 2;
-  const interval = setInterval(() => {
-    collector.collect()
-      .then(result => console.log(`热点自动采集完成：抓取 ${result.total} 条，新增 ${result.added} 条，跳过 ${result.skipped} 条`))
-      .catch(error => console.error('热点自动采集失败：', error.message || error));
-  }, intervalHours * 60 * 60 * 1000);
-  interval.unref();
-  console.log(`热点自动采集已启用，每 ${intervalHours} 小时运行一次`);
+  collectSchedulerStarted = true;
+  restartCollectTimer();
 }
 
 module.exports = app;
