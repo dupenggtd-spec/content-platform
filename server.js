@@ -8,6 +8,7 @@ const express = require('express');
 const cors = require('cors');
 const store = require('./db');
 const ai = require('./ai');
+const collector = require('./collector');
 
 const PORT = Number(process.env.PORT || 3000);
 const ROOT_DIR = __dirname;
@@ -61,6 +62,9 @@ app.delete('/api/ideas/:id', (req, res) => {
   const deleted = store.deleteIdea(req.params.id);
   return deleted ? success(res, { id: req.params.id, deleted: true }) : notFound(res, '创意');
 });
+
+app.post('/api/collect', asyncRoute(async (req, res) => success(res, await collector.collect())));
+app.get('/api/collect/status', asyncRoute(async (req, res) => success(res, await collector.readStatus())));
 
 app.get('/api/drafts', (req, res) => success(res, store.getDrafts()));
 app.post('/api/drafts', (req, res) => success(res, store.createDraft(req.body), 201));
@@ -280,6 +284,16 @@ if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`火花台运行中 → http://localhost:${PORT}`);
   });
+
+  const configuredHours = Number(process.env.COLLECT_INTERVAL_HOURS || 2);
+  const intervalHours = Number.isFinite(configuredHours) && configuredHours > 0 ? configuredHours : 2;
+  const interval = setInterval(() => {
+    collector.collect()
+      .then(result => console.log(`热点自动采集完成：抓取 ${result.total} 条，新增 ${result.added} 条，跳过 ${result.skipped} 条`))
+      .catch(error => console.error('热点自动采集失败：', error.message || error));
+  }, intervalHours * 60 * 60 * 1000);
+  interval.unref();
+  console.log(`热点自动采集已启用，每 ${intervalHours} 小时运行一次`);
 }
 
 module.exports = app;

@@ -109,6 +109,7 @@
     }
     .btn:hover { border-color: #4a535e; background: #222b36; transform: translateY(-1px); }
     .btn:active { transform: translateY(0); }
+    .btn:disabled { opacity: .62; cursor: wait; transform: none; }
     .btn svg { width: 16px; height: 16px; }
     .btn-primary { background: var(--primary); border-color: var(--primary); color: white; }
     .btn-primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
@@ -118,6 +119,23 @@
     .btn-sm { min-height: 30px; padding: 5px 9px; font-size: 12px; border-radius: 7px; }
     .icon-btn { width: 34px; height: 34px; padding: 0; border-radius: 8px; }
     .mobile-menu { display: none; }
+    .loading-spinner {
+      width: 15px; height: 15px; flex: 0 0 auto; border: 2px solid currentColor;
+      border-right-color: transparent; border-radius: 50%; animation: spin .75s linear infinite;
+    }
+    .collect-bar {
+      display: flex; align-items: center; justify-content: space-between; gap: 18px;
+      margin-bottom: 16px; padding: 14px 16px; border: 1px solid #bfdbfe;
+      border-radius: 12px; background: #eff6ff;
+    }
+    .collect-copy { min-width: 0; display: flex; align-items: center; gap: 11px; }
+    .collect-icon {
+      width: 34px; height: 34px; flex: 0 0 auto; display: grid; place-items: center;
+      border-radius: 9px; background: #dbeafe; color: var(--primary);
+    }
+    .collect-icon svg { width: 17px; height: 17px; }
+    .collect-copy strong { display: block; font-size: 13px; }
+    .collect-status { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
 
     .hero {
       position: relative; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(280px, .75fr);
@@ -520,6 +538,7 @@
     @keyframes fadeIn { from { opacity:0; } }
     @keyframes slideUp { from { opacity:0; transform:translateY(12px); } }
     @keyframes toastIn { from { opacity:0; transform:translateX(12px); } }
+    @keyframes spin { to { transform:rotate(360deg); } }
 
     @media (max-width: 1100px) {
       .draft-workspace { grid-template-columns:260px minmax(0,1fr); }
@@ -553,6 +572,8 @@
       .form-grid, .score-sliders { grid-template-columns:1fr; }
       .field.full { grid-column:auto; }
       .top-actions .desktop-only { display:none; }
+      .collect-bar { align-items: stretch; flex-direction: column; }
+      .collect-bar .btn { width: 100%; }
       .modal-backdrop { padding:8px; }
       .modal { max-height:calc(100vh - 16px); }
     }
@@ -764,7 +785,7 @@
           id:item.id,
           title:item.title||'',
           sectionId:item.section||'',
-          sourceMode:item.source==='manual'?'manual':/热点|雷达|自动|监测/.test(item.source||'')?'auto':'manual',
+          sourceMode:item.source==='manual'?'manual':/热点|雷达|自动|监测|汽车之家|RSSHub|36氪|机器之心|微博/.test(item.source||'')?'auto':'manual',
           source:item.source||'manual',
           scores:{
             intensity:Number(item.score_intensity||0),
@@ -907,6 +928,8 @@
       let syncedCollections = Object.fromEntries(Object.keys(API_COLLECTIONS).map(key=>[key,new Map()]));
       let pendingConfirmAction = null;
       let activeIdeaFormDraft = null;
+      let collectStatus = { running:false, lastCollectedAt:null, result:null };
+      let collectRunning = false;
       const extensionModules = new Map();
       const subscribers = new Set();
 
@@ -981,9 +1004,9 @@
       async function hydrateState() {
         setSaveLabel('正在连接数据库…');
         try {
-          const [ideas,drafts,published,principles,sections] = await Promise.all([
+          const [ideas,drafts,published,principles,sections,collectorState] = await Promise.all([
             apiRequest('/api/ideas'), apiRequest('/api/drafts'), apiRequest('/api/published'),
-            apiRequest('/api/principles'), apiRequest('/api/sections')
+            apiRequest('/api/principles'), apiRequest('/api/sections'), apiRequest('/api/collect/status')
           ]);
           const hydrated = normalizeState({
             ...defaultState(),
@@ -995,6 +1018,7 @@
             sections:sections.map(sectionFromApi)
           });
           state = hydrated;
+          collectStatus = collectorState || collectStatus;
           activeView = navItems.some(item=>item.id===state.settings.activeView)?state.settings.activeView:'ideas';
           syncedCollections = Object.fromEntries(Object.keys(API_COLLECTIONS).map(key=>[key,new Map(stateItems(key).map(item=>[item.id,clone(item)]))]));
           apiReady = true;
@@ -1058,7 +1082,7 @@
       }
 
       function topButtons() {
-        if (activeView === 'ideas') return `<button class="btn desktop-only" data-action="auto-idea">${icons.spark}自动采集</button><button class="btn btn-primary" data-action="add-idea">${icons.plus}添加创意</button>`;
+        if (activeView === 'ideas') return `<button class="btn btn-primary" data-action="add-idea">${icons.plus}添加创意</button>`;
         if (activeView === 'drafts') return `<button class="btn" data-view="ideas">${icons.arrow}去采用创意</button><button class="btn btn-primary" data-action="add-draft">${icons.plus}新建稿件</button>`;
         if (activeView === 'published') return `<button class="btn" data-view="drafts">${icons.edit}继续写稿</button>`;
         if (activeView === 'analytics') return `<button class="btn" data-action="export-csv">${icons.download}导出复盘表</button>`;
@@ -1107,7 +1131,18 @@
         const recommended = ideas.filter(i => ideaScore(i) >= 12).length;
         const adopted = ideas.filter(i => i.status === 'adopted').length;
         const auto = ideas.filter(i => i.sourceMode === 'auto').length;
+        const lastResult = collectStatus?.result;
+        const failedSources = Array.isArray(lastResult?.details) ? lastResult.details.filter(detail=>detail?.error).length : 0;
+        const collectorText = collectRunning || collectStatus?.running
+          ? '正在抓取热点并进行 AI 评分，请稍候…'
+          : collectStatus?.lastCollectedAt
+            ? `上次采集：${formatFullDate(collectStatus.lastCollectedAt)} · 新增 ${Number(lastResult?.added||0)} 条 · 跳过 ${Number(lastResult?.skipped||0)} 条${failedSources?` · ${failedSources} 个来源不可用`:''}`
+            : '尚未采集；服务端会按设定间隔自动运行。';
         return `
+          <section class="collect-bar">
+            <div class="collect-copy"><i class="collect-icon">${icons.analytics}</i><div><strong>热点自动采集</strong><span class="collect-status">${esc(collectorText)}</span></div></div>
+            <button type="button" class="btn btn-primary" data-action="collect-hotspots" ${collectRunning||collectStatus?.running?'disabled':''}>${collectRunning||collectStatus?.running?'<i class="loading-spinner" aria-hidden="true"></i>采集中…':`${icons.spark}采集热点`}</button>
+          </section>
           <section class="hero">
             <div><h2>把灵光一闪，变成<span class="hero-accent">可复盘的生产线</span></h2><p>热点负责敲门，判断力决定做不做。先用四维评分筛选，再让稿件和数据替你积累经验。</p></div>
             <div class="hero-stats"><div class="hero-stat"><strong>${ideas.length}</strong><span>创意池</span></div><div class="hero-stat"><strong>${recommended}</strong><span>推荐做</span></div><div class="hero-stat"><strong>${adopted}</strong><span>已采用</span></div></div>
@@ -1699,6 +1734,51 @@
         finally { if(button){button.disabled=false;button.innerHTML=original;} }
       }
 
+      function mergeCollectedIdeas(serverIdeas) {
+        const currentIds = new Set(stateItems('ideas').map(idea=>idea.id));
+        const newIdeas = safeArray(serverIdeas).map(ideaFromApi).filter(idea=>!currentIds.has(idea.id));
+        if (newIdeas.length) state.ideas.unshift(...newIdeas);
+        for (const idea of newIdeas) syncedCollections.ideas.set(idea.id,clone(idea));
+        return newIdeas.length;
+      }
+
+      async function refreshCollectStatus() {
+        if (!apiReady || collectRunning) return;
+        try {
+          const previousTime = collectStatus?.lastCollectedAt;
+          const serverStatus = await apiRequest('/api/collect/status');
+          collectStatus = serverStatus || collectStatus;
+          if (serverStatus?.lastCollectedAt && serverStatus.lastCollectedAt !== previousTime) {
+            mergeCollectedIdeas(await apiRequest('/api/ideas'));
+          }
+          if (activeView==='ideas') render();
+        } catch (_) { /* 状态轮询失败不影响页面编辑。 */ }
+      }
+
+      async function collectHotspots() {
+        if (collectRunning) return;
+        collectRunning = true;
+        collectStatus = { ...collectStatus, running:true };
+        render();
+        try {
+          const result = await apiRequest('/api/collect',{method:'POST'});
+          const [serverStatus,serverIdeas] = await Promise.all([
+            apiRequest('/api/collect/status'),
+            apiRequest('/api/ideas')
+          ]);
+          collectStatus = serverStatus || { running:false, lastCollectedAt:nowISO(), result };
+          mergeCollectedIdeas(serverIdeas);
+          toast('热点采集完成',`抓取 ${result.total} 条，新增 ${result.added} 条，跳过 ${result.skipped} 条`);
+        } catch (error) {
+          toast('热点采集失败',error.message||'请稍后重试','error');
+          try { collectStatus = await apiRequest('/api/collect/status'); } catch (_) { /* 保留当前状态。 */ }
+        } finally {
+          collectRunning = false;
+          collectStatus = { ...collectStatus, running:false };
+          render();
+        }
+      }
+
       function applyGeneratedCopy(draft, content) {
         const text = String(content||'').replace(/^```[a-z]*\s*|```$/gi,'').trim();
         const titleMatch = text.match(/(?:^|\n)标题[：:]\s*([^\n]+)/);
@@ -1847,7 +1927,7 @@
           return;
         }
         const actions = {
-          'add-idea':()=>showIdeaModal(), 'auto-idea':()=>showIdeaModal(null,'auto'), 'edit-idea':()=>showIdeaModal(id), 'adopt-idea':()=>adoptIdea(id),
+          'add-idea':()=>showIdeaModal(), 'auto-idea':()=>showIdeaModal(null,'auto'), 'collect-hotspots':collectHotspots, 'edit-idea':()=>showIdeaModal(id), 'adopt-idea':()=>adoptIdea(id),
           'ai-score-idea':()=>scoreIdeaForm(actionTarget),
           'delete-idea':()=>confirmAction('删除这条创意？','对应稿件和发布记录不会被删除。',()=>{state.ideas=state.ideas.filter(i=>i.id!==id);saveState(true);render();toast('创意已删除');}),
           'add-draft':()=>showDraftModal(),
@@ -1986,6 +2066,7 @@
 
       render();
       hydrateState();
+      setInterval(refreshCollectStatus,60*1000);
     })();
   </script>
 </body>

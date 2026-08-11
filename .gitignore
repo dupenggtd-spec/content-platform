@@ -2,6 +2,7 @@
 node_modules/
 data/*.db
 data/*.db-*
+data/collect_status.json
 exports/*
 *.tmp
 *.log
