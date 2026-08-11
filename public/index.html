@@ -1623,6 +1623,7 @@
           : '尚无采集记录。点击“立即采集”可手动运行一次。';
         const frequencyValue = collectConfig.enabled ? String(collectConfig.intervalHours) : 'off';
         const selectedSourceIds = new Set(safeArray(collectConfig.selectedSources));
+        const noCollectSources = collectSources.length > 0 && selectedSourceIds.size === 0;
         const categoryLabels = { auto:'汽车', ai:'AI', general:'通用' };
         return `
           <div class="settings-grid">
@@ -1634,9 +1635,9 @@
                   <div class="collect-control-row"><div class="collect-control-label"><strong>采集频率</strong><span>选择小时数会自动开启任务</span></div><select class="select collect-frequency" data-collect-frequency aria-label="自动采集频率" ${collectConfigSaving?'disabled':''}>${[['1','1小时'],['2','2小时'],['4','4小时'],['6','6小时'],['12','12小时'],['off','关闭']].map(([value,label])=>`<option value="${value}" ${frequencyValue===value?'selected':''}>${label}</option>`).join('')}</select></div>
                 </div>
                 <div class="collect-status-panel">
-                  <div class="collect-status-head"><strong>采集状态</strong><span class="badge ${isCollecting?'badge-blue':'badge-green'}">${isCollecting?'采集中':'空闲'}</span></div>
-                  <div class="collect-status-detail">${esc(resultText)}</div>
-                  <button type="button" class="btn btn-primary" data-action="collect-hotspots" ${isCollecting?'disabled':''}>${isCollecting?'<i class="loading-spinner" aria-hidden="true"></i>采集中…':`${icons.spark}立即采集`}</button>
+                  <div class="collect-status-head"><strong>采集状态</strong><span class="badge ${isCollecting?'badge-blue':noCollectSources?'badge-yellow':'badge-green'}">${isCollecting?'采集中':noCollectSources?'待选择':'空闲'}</span></div>
+                  <div class="collect-status-detail">${esc(noCollectSources?'尚未选择采集源，请至少勾选一个来源后再运行。':resultText)}</div>
+                  <button type="button" class="btn btn-primary" data-action="collect-hotspots" ${isCollecting||noCollectSources?'disabled':''}>${isCollecting?'<i class="loading-spinner" aria-hidden="true"></i>采集中…':noCollectSources?'请选择采集源':`${icons.spark}立即采集`}</button>
                 </div>
                 <div class="collect-source-panel">
                   <div class="collect-source-head">
@@ -1882,6 +1883,10 @@
 
       async function collectHotspots() {
         if (collectRunning) return;
+        if (collectSources.length && !safeArray(collectConfig.selectedSources).length) {
+          toast('请先选择采集源','可在设置页的自动采集区块中勾选来源','warn');
+          return;
+        }
         collectRunning = true;
         collectStatus = { ...collectStatus, running:true };
         render();
