@@ -15,40 +15,50 @@ const COLLECT_MODEL = 'glm-4.7-flash';
 
 const SOURCES = [
   {
-    name: '汽车之家 RSS',
+    id: 'autohome',
+    name: '汽车之家',
+    category: 'auto',
     url: 'https://www.autohome.com.cn/rss/',
     section: 'car-choice',
     sectionName: '带你选好车',
-    type: 'html',
-    linkPattern: /(?:(?:www\.)?autohome\.com\.cn\/news\/\d{6}\/\d+\.html|chejiahao\.autohome\.com\.cn\/info\/\d+)/i
+    type: 'rss'
   },
   {
-    name: 'RSSHub 汽车新闻',
-    url: 'https://rsshub.app/auto/home/news',
+    id: 'autohome_html',
+    name: '汽车之家新闻(网页)',
+    category: 'auto',
+    url: 'https://www.autohome.com.cn/news/',
     section: 'car-choice',
     sectionName: '带你选好车',
-    type: 'feed'
+    type: 'html',
+    linkPattern: /\/news\/\d{6}\//
   },
   {
-    name: '36氪 AI 频道',
-    url: 'https://rsshub.app/36kr/motif/506530',
+    id: 'sspai',
+    name: '少数派',
+    category: 'ai',
+    url: 'https://sspai.com/feed',
     section: 'ai-rookie',
     sectionName: '零基础AI',
-    type: 'feed'
+    type: 'rss'
   },
   {
-    name: '机器之心',
-    url: 'https://rsshub.app/jiqizhixin',
+    id: 'kr36',
+    name: '36氪',
+    category: 'ai',
+    url: 'https://36kr.com/feed',
     section: 'ai-rookie',
     sectionName: '零基础AI',
-    type: 'feed'
+    type: 'rss'
   },
   {
-    name: '微博热搜 · AI汽车',
-    url: 'https://rsshub.app/weibo/search/hot/AI%E6%B1%BD%E8%BD%A6',
+    id: 'weibo_hot',
+    name: '微博热搜',
+    category: 'general',
+    url: 'https://rsshub.rssforever.com/weibo/search/hot/AI汽车',
     section: 'ai-rookie',
     sectionName: 'AI × 汽车',
-    type: 'feed'
+    type: 'rss'
   }
 ];
 
@@ -270,12 +280,14 @@ async function readStatus() {
   }
 }
 
-async function runCollection() {
+async function runCollection(selectedSourceIds) {
   const startedAt = new Date().toISOString();
   const previousStatus = await readStatus();
   await writeStatus({ ...previousStatus, running: true, pid: process.pid, lastStartedAt: startedAt });
 
-  const sourceResults = await Promise.all(SOURCES.map(async source => {
+  const selectedIds = Array.isArray(selectedSourceIds) ? new Set(selectedSourceIds) : null;
+  const activeSources = selectedIds ? SOURCES.filter(source => selectedIds.has(source.id)) : SOURCES;
+  const sourceResults = await Promise.all(activeSources.map(async source => {
     try {
       return { source, items: await fetchSource(source), error: null };
     } catch (error) {
@@ -373,9 +385,10 @@ async function runCollection() {
   return result;
 }
 
-async function collect() {
+async function collect(selectedSourceIds) {
   if (runningCollection) return runningCollection;
-  runningCollection = runCollection().catch(async error => {
+  const sourceIds = Array.isArray(selectedSourceIds) ? [...selectedSourceIds] : undefined;
+  runningCollection = runCollection(sourceIds).catch(async error => {
     const status = {
       running: false,
       lastStartedAt: new Date().toISOString(),
@@ -390,7 +403,19 @@ async function collect() {
   return runningCollection;
 }
 
+function listSources(selectedSourceIds) {
+  const selectedIds = Array.isArray(selectedSourceIds) ? new Set(selectedSourceIds) : null;
+  return SOURCES.map(source => ({
+    id: source.id,
+    name: source.name,
+    category: source.category,
+    url: source.url,
+    enabled: selectedIds ? selectedIds.has(source.id) : true
+  }));
+}
+
 module.exports = {
   collect,
-  readStatus
+  readStatus,
+  listSources
 };

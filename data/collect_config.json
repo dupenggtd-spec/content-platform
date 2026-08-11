@@ -1,4 +1,11 @@
 {
   "enabled": true,
-  "intervalHours": 2
+  "intervalHours": 2,
+  "selectedSources": [
+    "autohome",
+    "autohome_html",
+    "sspai",
+    "kr36",
+    "weibo_hot"
+  ]
 }

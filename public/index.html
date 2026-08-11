@@ -418,6 +418,18 @@
     .collect-status-head strong { font-size:13px; }
     .collect-status-detail { min-height:42px; margin:12px 0 14px; color:var(--muted); font-size:12px; line-height:1.7; }
     .collect-status-panel .btn { width:100%; }
+    .collect-source-panel { grid-column:1/-1; padding:15px; border:1px solid var(--border); border-radius:11px; background:var(--panel-2); }
+    .collect-source-head { display:flex; align-items:center; justify-content:space-between; gap:14px; margin-bottom:11px; }
+    .collect-source-title strong { display:block; font-size:13px; }
+    .collect-source-title span { display:block; margin-top:2px; color:var(--muted); font-size:11px; }
+    .collect-source-actions { display:flex; gap:7px; }
+    .collect-source-list { display:grid; gap:7px; }
+    .collect-source-row { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:10px; min-height:38px; padding:7px 10px; border:1px solid var(--border); border-radius:8px; background:#fff; cursor:pointer; }
+    .collect-source-row:hover { border-color:#bfdbfe; background:#f8fbff; }
+    .collect-source-checkbox { width:16px; height:16px; margin:0; accent-color:var(--primary); cursor:pointer; }
+    .collect-source-name { overflow:hidden; color:var(--text); font-size:12px; font-weight:600; text-overflow:ellipsis; white-space:nowrap; }
+    .collect-source-category { min-width:42px; justify-content:center; }
+    .collect-source-empty { padding:16px; border:1px dashed var(--border); border-radius:8px; color:var(--muted); text-align:center; font-size:12px; }
     .danger-zone { margin-top:18px; padding-top:17px; border-top:1px solid rgba(248,81,73,.18); }
     .danger-zone h4 { margin:0 0 9px; color:#ff7b72; font-size:12px; }
     .api-box { padding:14px; background:#0c1015; border:1px solid var(--border); border-radius:9px; font:11px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace; color:#aab3bd; overflow:auto; }
@@ -588,6 +600,7 @@
       .top-actions .desktop-only { display:none; }
       .collect-bar { align-items: stretch; flex-direction: column; }
       .collect-bar .btn { width: 100%; }
+      .collect-source-head { align-items:flex-start; flex-direction:column; }
       .modal-backdrop { padding:8px; }
       .modal { max-height:calc(100vh - 16px); }
     }
@@ -943,7 +956,8 @@
       let pendingConfirmAction = null;
       let activeIdeaFormDraft = null;
       let collectStatus = { running:false, lastCollectedAt:null, result:null };
-      let collectConfig = { enabled:true, intervalHours:2 };
+      let collectConfig = { enabled:true, intervalHours:2, selectedSources:[] };
+      let collectSources = [];
       let collectRunning = false;
       let collectConfigSaving = false;
       const extensionModules = new Map();
@@ -1020,10 +1034,10 @@
       async function hydrateState() {
         setSaveLabel('正在连接数据库…');
         try {
-          const [ideas,drafts,published,principles,sections,collectorState,collectorConfig] = await Promise.all([
+          const [ideas,drafts,published,principles,sections,collectorState,collectorConfig,collectorSources] = await Promise.all([
             apiRequest('/api/ideas'), apiRequest('/api/drafts'), apiRequest('/api/published'),
             apiRequest('/api/principles'), apiRequest('/api/sections'), apiRequest('/api/collect/status'),
-            apiRequest('/api/collect/config')
+            apiRequest('/api/collect/config'), apiRequest('/api/collect/sources')
           ]);
           const hydrated = normalizeState({
             ...defaultState(),
@@ -1037,6 +1051,7 @@
           state = hydrated;
           collectStatus = collectorState || collectStatus;
           collectConfig = collectorConfig || collectConfig;
+          collectSources = safeArray(collectorSources);
           activeView = navItems.some(item=>item.id===state.settings.activeView)?state.settings.activeView:'ideas';
           syncedCollections = Object.fromEntries(Object.keys(API_COLLECTIONS).map(key=>[key,new Map(stateItems(key).map(item=>[item.id,clone(item)]))]));
           apiReady = true;
@@ -1607,6 +1622,8 @@
             : `上次采集：${formatFullDate(collectStatus.lastCollectedAt)} · 抓取 ${Number(lastResult?.total||0)} 条，新增 ${Number(lastResult?.added||0)} 条，跳过 ${Number(lastResult?.skipped||0)} 条`
           : '尚无采集记录。点击“立即采集”可手动运行一次。';
         const frequencyValue = collectConfig.enabled ? String(collectConfig.intervalHours) : 'off';
+        const selectedSourceIds = new Set(safeArray(collectConfig.selectedSources));
+        const categoryLabels = { auto:'汽车', ai:'AI', general:'通用' };
         return `
           <div class="settings-grid">
             <section class="card settings-card collect-settings">
@@ -1620,6 +1637,17 @@
                   <div class="collect-status-head"><strong>采集状态</strong><span class="badge ${isCollecting?'badge-blue':'badge-green'}">${isCollecting?'采集中':'空闲'}</span></div>
                   <div class="collect-status-detail">${esc(resultText)}</div>
                   <button type="button" class="btn btn-primary" data-action="collect-hotspots" ${isCollecting?'disabled':''}>${isCollecting?'<i class="loading-spinner" aria-hidden="true"></i>采集中…':`${icons.spark}立即采集`}</button>
+                </div>
+                <div class="collect-source-panel">
+                  <div class="collect-source-head">
+                    <div class="collect-source-title"><strong>采集源</strong><span>已选择 ${selectedSourceIds.size}/${collectSources.length} 个来源，自动和手动采集共用此范围</span></div>
+                    <div class="collect-source-actions"><button type="button" class="btn btn-sm" data-action="select-all-collect-sources" ${collectConfigSaving||!collectSources.length||selectedSourceIds.size===collectSources.length?'disabled':''}>全选</button><button type="button" class="btn btn-sm" data-action="clear-collect-sources" ${collectConfigSaving||!selectedSourceIds.size?'disabled':''}>全不选</button></div>
+                  </div>
+                  <div class="collect-source-list">${collectSources.length?collectSources.map(source=>{
+                    const category = Object.prototype.hasOwnProperty.call(categoryLabels,source.category) ? source.category : 'general';
+                    const badgeClass = category==='auto'?'badge-blue':category==='ai'?'badge-purple':'badge-gray';
+                    return `<label class="collect-source-row" title="${escAttr(source.url||'')}"><input class="collect-source-checkbox" type="checkbox" data-collect-source-id="${escAttr(source.id||'')}" ${selectedSourceIds.has(source.id)?'checked':''} ${collectConfigSaving?'disabled':''}><span class="collect-source-name">${esc(source.name||source.id||'未命名来源')}</span><span class="badge ${badgeClass} collect-source-category">${categoryLabels[category]}</span></label>`;
+                  }).join(''):'<div class="collect-source-empty">后端连接后将在这里显示采集源。</div>'}</div>
                 </div>
               </div>
             </section>
@@ -1783,7 +1811,7 @@
       }
 
       async function refreshCollectStatus() {
-        if (!apiReady || collectRunning) return;
+        if (!apiReady || collectRunning || collectConfigSaving) return;
         try {
           const previousTime = collectStatus?.lastCollectedAt;
           const [serverStatus,serverConfig] = await Promise.all([
@@ -1804,15 +1832,19 @@
           if (!apiReady) toast('后端未连接','请先启动服务端并刷新页面','warn');
           return;
         }
+        const previousConfig = collectConfig;
+        collectConfig = { ...collectConfig, ...patch };
         collectConfigSaving = true;
         render();
         try {
           collectConfig = await apiRequest('/api/collect/config',{
             method:'POST',
-            body:JSON.stringify({ ...collectConfig, ...patch })
+            body:JSON.stringify(collectConfig)
           });
-          toast('自动采集设置已更新',collectConfig.enabled?`每 ${collectConfig.intervalHours} 小时采集一次`:'定时任务已关闭');
+          const sourceRangeChanged = Object.prototype.hasOwnProperty.call(patch,'selectedSources');
+          toast(sourceRangeChanged?'采集源范围已更新':'自动采集设置已更新',sourceRangeChanged?`已选择 ${safeArray(collectConfig.selectedSources).length}/${collectSources.length} 个来源`:collectConfig.enabled?`每 ${collectConfig.intervalHours} 小时采集一次`:'定时任务已关闭');
         } catch (error) {
+          collectConfig = previousConfig;
           toast('自动采集设置保存失败',error.message||'请稍后重试','error');
         } finally {
           collectConfigSaving = false;
@@ -1829,6 +1861,23 @@
         const intervalHours = Number(value);
         if (![1,2,4,6,12].includes(intervalHours)) return;
         return updateCollectConfig({ enabled:true, intervalHours });
+      }
+
+      function changeCollectSource(sourceId, enabled) {
+        if (!collectSources.some(source=>source.id===sourceId)) return;
+        const selectedIds = new Set(safeArray(collectConfig.selectedSources));
+        if (enabled) selectedIds.add(sourceId); else selectedIds.delete(sourceId);
+        return updateCollectConfig({
+          selectedSources:collectSources.map(source=>source.id).filter(id=>selectedIds.has(id))
+        });
+      }
+
+      function selectAllCollectSources() {
+        return updateCollectConfig({ selectedSources:collectSources.map(source=>source.id) });
+      }
+
+      function clearCollectSources() {
+        return updateCollectConfig({ selectedSources:[] });
       }
 
       async function collectHotspots() {
@@ -2003,7 +2052,7 @@
           return;
         }
         const actions = {
-          'add-idea':()=>showIdeaModal(), 'auto-idea':()=>showIdeaModal(null,'auto'), 'collect-hotspots':collectHotspots, 'toggle-auto-collect':toggleAutoCollect, 'edit-idea':()=>showIdeaModal(id), 'adopt-idea':()=>adoptIdea(id),
+          'add-idea':()=>showIdeaModal(), 'auto-idea':()=>showIdeaModal(null,'auto'), 'collect-hotspots':collectHotspots, 'toggle-auto-collect':toggleAutoCollect, 'select-all-collect-sources':selectAllCollectSources, 'clear-collect-sources':clearCollectSources, 'edit-idea':()=>showIdeaModal(id), 'adopt-idea':()=>adoptIdea(id),
           'ai-score-idea':()=>scoreIdeaForm(actionTarget),
           'delete-idea':()=>confirmAction('删除这条创意？','对应稿件和发布记录不会被删除。',()=>{state.ideas=state.ideas.filter(i=>i.id!==id);saveState(true);render();toast('创意已删除');}),
           'add-draft':()=>showDraftModal(),
@@ -2056,6 +2105,10 @@
       });
 
       document.addEventListener('change', event => {
+        if (event.target.matches('[data-collect-source-id]')) {
+          changeCollectSource(event.target.dataset.collectSourceId,event.target.checked);
+          return;
+        }
         if (event.target.matches('[data-collect-frequency]')) {
           changeCollectFrequency(event.target.value);
           return;

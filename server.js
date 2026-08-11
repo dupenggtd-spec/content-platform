@@ -19,7 +19,13 @@ const DATA_DIR = path.join(ROOT_DIR, 'data');
 const COLLECT_CONFIG_PATH = path.join(DATA_DIR, 'collect_config.json');
 const DOWNLOADS_DIR = path.join(os.homedir(), 'Downloads');
 const IMAGE_GENERATION_TIMEOUT_MS = 180000;
-const DEFAULT_COLLECT_CONFIG = Object.freeze({ enabled: true, intervalHours: 2 });
+const COLLECT_SOURCE_IDS = Object.freeze(collector.listSources().map(source => source.id));
+const COLLECT_SOURCE_ID_SET = new Set(COLLECT_SOURCE_IDS);
+const DEFAULT_COLLECT_CONFIG = Object.freeze({
+  enabled: true,
+  intervalHours: 2,
+  selectedSources: COLLECT_SOURCE_IDS
+});
 const MAX_COLLECT_INTERVAL_HOURS = Math.floor(2_147_483_647 / (60 * 60 * 1000));
 
 fs.mkdirSync(PUBLIC_DIR, { recursive: true });
@@ -29,11 +35,15 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 function normalizeCollectConfig(value) {
   const config = value && typeof value === 'object' ? value : {};
   const intervalHours = Number(config.intervalHours);
+  const selectedSources = Array.isArray(config.selectedSources)
+    ? [...new Set(config.selectedSources.filter(id => typeof id === 'string' && COLLECT_SOURCE_ID_SET.has(id)))]
+    : [...COLLECT_SOURCE_IDS];
   return {
     enabled: typeof config.enabled === 'boolean' ? config.enabled : DEFAULT_COLLECT_CONFIG.enabled,
     intervalHours: Number.isFinite(intervalHours) && intervalHours > 0 && intervalHours <= MAX_COLLECT_INTERVAL_HOURS
       ? intervalHours
-      : DEFAULT_COLLECT_CONFIG.intervalHours
+      : DEFAULT_COLLECT_CONFIG.intervalHours,
+    selectedSources
   };
 }
 
@@ -42,7 +52,7 @@ function readCollectConfig() {
     return normalizeCollectConfig(JSON.parse(fs.readFileSync(COLLECT_CONFIG_PATH, 'utf8')));
   } catch (error) {
     if (error.code !== 'ENOENT') console.warn('读取自动采集配置失败，将使用默认配置：', error.message || error);
-    return { ...DEFAULT_COLLECT_CONFIG };
+    return { ...DEFAULT_COLLECT_CONFIG, selectedSources: [...DEFAULT_COLLECT_CONFIG.selectedSources] };
   }
 }
 
@@ -51,7 +61,7 @@ let collectTimer = null;
 let collectSchedulerStarted = false;
 
 function runScheduledCollection() {
-  collector.collect()
+  collector.collect(collectConfig.selectedSources)
     .then(result => console.log(`热点自动采集完成：抓取 ${result.total} 条，新增 ${result.added} 条，跳过 ${result.skipped} 条`))
     .catch(error => console.error('热点自动采集失败：', error.message || error));
 }
@@ -78,13 +88,28 @@ async function updateCollectConfig(patch) {
   }
   const hasEnabled = Object.prototype.hasOwnProperty.call(patch, 'enabled');
   const hasInterval = Object.prototype.hasOwnProperty.call(patch, 'intervalHours');
-  if (!hasEnabled && !hasInterval) {
-    const error = new Error('请提供 enabled 或 intervalHours');
+  const hasSelectedSources = Object.prototype.hasOwnProperty.call(patch, 'selectedSources');
+  if (!hasEnabled && !hasInterval && !hasSelectedSources) {
+    const error = new Error('请提供 enabled、intervalHours 或 selectedSources');
     error.status = 400;
     throw error;
   }
   if (hasEnabled && typeof patch.enabled !== 'boolean') {
     const error = new Error('enabled 必须是布尔值');
+    error.status = 400;
+    throw error;
+  }
+  if (hasSelectedSources && !Array.isArray(patch.selectedSources)) {
+    const error = new Error('selectedSources 必须是源 ID 数组');
+    error.status = 400;
+    throw error;
+  }
+  const selectedSources = hasSelectedSources
+    ? [...new Set(patch.selectedSources)]
+    : collectConfig.selectedSources;
+  const invalidSourceId = selectedSources.find(id => typeof id !== 'string' || !COLLECT_SOURCE_ID_SET.has(id));
+  if (invalidSourceId !== undefined) {
+    const error = new Error(`未知的采集源 ID：${String(invalidSourceId)}`);
     error.status = 400;
     throw error;
   }
@@ -96,7 +121,8 @@ async function updateCollectConfig(patch) {
   }
   const nextConfig = {
     enabled: hasEnabled ? patch.enabled : collectConfig.enabled,
-    intervalHours
+    intervalHours,
+    selectedSources
   };
   const temporaryPath = `${COLLECT_CONFIG_PATH}.${process.pid}.${Date.now()}.tmp`;
   await fs.promises.writeFile(temporaryPath, `${JSON.stringify(nextConfig, null, 2)}\n`, 'utf8');
@@ -148,8 +174,9 @@ app.delete('/api/ideas/:id', (req, res) => {
   return deleted ? success(res, { id: req.params.id, deleted: true }) : notFound(res, '创意');
 });
 
-app.post('/api/collect', asyncRoute(async (req, res) => success(res, await collector.collect())));
+app.post('/api/collect', asyncRoute(async (req, res) => success(res, await collector.collect(collectConfig.selectedSources))));
 app.get('/api/collect/status', asyncRoute(async (req, res) => success(res, await collector.readStatus())));
+app.get('/api/collect/sources', (req, res) => success(res, collector.listSources(collectConfig.selectedSources)));
 app.get('/api/collect/config', (req, res) => success(res, { ...collectConfig }));
 app.post('/api/collect/config', asyncRoute(async (req, res) => success(res, await updateCollectConfig(req.body))));
 
